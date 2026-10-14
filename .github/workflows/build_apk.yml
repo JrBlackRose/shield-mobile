@@ -21,7 +21,7 @@ jobs:
         run: |
           rm -rf /tmp/shield_build
           flutter create --org com.projectshield.trader --project-name shield --platforms android /tmp/shield_build
-          rm -rf /tmp/shield_build/test
+          rm -rf /tmp/shield_build/test /tmp/shield_build/analysis_options.yaml
           cp flutter_shield/pubspec.yaml /tmp/shield_build/pubspec.yaml
           cp flutter_shield/lib/*.dart /tmp/shield_build/lib/
 

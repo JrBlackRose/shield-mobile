@@ -152,8 +152,8 @@ class ShieldApp extends StatelessWidget {
           unselectedItemColor: Pal.muted,
           type: BottomNavigationBarType.fixed,
           showUnselectedLabels: true,
-          selectedFontSize: 11,
-          unselectedFontSize: 11,
+          selectedLabelStyle: TextStyle(fontSize: 11),
+          unselectedLabelStyle: TextStyle(fontSize: 11),
         ),
         inputDecorationTheme: InputDecorationTheme(
           filled: true,
