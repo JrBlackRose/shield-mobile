@@ -1,26 +1,48 @@
 name: Build Project Shield Android APK
 on: [push, workflow_dispatch]
+
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-java@v5
         with:
           distribution: 'zulu'
           java-version: '17'
+
       - uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.24.0'
           channel: 'stable'
-      - name: Build APK
+
+      - name: Scaffold Android & Inject Permissions
+        run: |
+          cp flutter_shield/lib/main.dart /tmp/main.dart
+          cp flutter_shield/pubspec.yaml /tmp/pubspec.yaml
+          rm -rf flutter_shield
+          flutter create --org com.projectshield.trader --project-name shield --platforms android flutter_shield
+          cp /tmp/main.dart flutter_shield/lib/main.dart
+          cp /tmp/pubspec.yaml flutter_shield/pubspec.yaml
+          rm -rf flutter_shield/test
+          python3 -c '
+          p = "flutter_shield/android/app/src/main/AndroidManifest.xml"
+          s = open(p).read()
+          if "android.permission.INTERNET" not in s:
+              s = s.replace("<application", "<uses-permission android:name=\"android.permission.INTERNET\"/>\n    <application android:allowBackup=\"false\"")
+          open(p, "w").write(s)
+          '
+
+      - name: Compile Release APK
         run: |
           cd flutter_shield
-          flutter create . --org com.projectshield.trader
           flutter pub get
+          flutter analyze --no-fatal-infos --no-fatal-warnings
           flutter build apk --release
-      - name: Upload APK
+
+      - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ProjectShield-APK
+          name: ProjectShield-v3-APK
           path: flutter_shield/build/app/outputs/flutter-apk/app-release.apk

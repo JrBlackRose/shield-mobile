@@ -1,0 +1,21 @@
+name: shield
+description: Project Shield v3.0 - standalone BYOK paper-trading risk cockpit (Alpaca + Gemini).
+publish_to: 'none'
+version: 3.0.0+1
+
+environment:
+  # Dart 3 is required: sealed classes, records, switch expressions, `abstract final class`.
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  http: ^1.2.0
+  shared_preferences: ^2.2.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+flutter:
+  uses-material-design: true
