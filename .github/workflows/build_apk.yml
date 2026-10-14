@@ -17,34 +17,34 @@ jobs:
           flutter-version: '3.24.0'
           channel: 'stable'
 
-      - name: Scaffold Android, Bump Kotlin & Inject Permissions
+      - name: Assemble Clean Flutter Project & Configure Android
         run: |
-          rm -rf /tmp/shield_lib
-          cp -r flutter_shield/lib /tmp/shield_lib
-          cp flutter_shield/pubspec.yaml /tmp/pubspec.yaml
-          rm -rf flutter_shield
-          flutter create --org com.projectshield.trader --project-name shield --platforms android flutter_shield
-          cp -r /tmp/shield_lib/* flutter_shield/lib/
-          cp /tmp/pubspec.yaml flutter_shield/pubspec.yaml
-          rm -rf flutter_shield/test
-          python3 -c '
+          rm -rf /tmp/shield_build
+          flutter create --org com.projectshield.trader --project-name shield --platforms android /tmp/shield_build
+          rm -rf /tmp/shield_build/test
+          cp flutter_shield/pubspec.yaml /tmp/shield_build/pubspec.yaml
+          cp flutter_shield/lib/*.dart /tmp/shield_build/lib/
+
+          cat << 'PYEOF' > /tmp/patch_android.py
           import glob, re
-          p = "flutter_shield/android/app/src/main/AndroidManifest.xml"
+
+          p = "/tmp/shield_build/android/app/src/main/AndroidManifest.xml"
           s = open(p).read()
           if "android.permission.INTERNET" not in s:
-              s = s.replace("<application", "<uses-permission android:name=\"android.permission.INTERNET\"/>\n    <application android:allowBackup=\"false\"")
+              s = s.replace("<application", '<uses-permission android:name="android.permission.INTERNET"/>\n    <application android:allowBackup="false"')
           open(p, "w").write(s)
 
-          for gf in glob.glob("flutter_shield/android/**/*.gradle*", recursive=True):
+          for gf in glob.glob("/tmp/shield_build/android/**/*.gradle*", recursive=True):
               txt = open(gf).read()
-              txt = re.sub(r"(id\s+[\"'\'']org\.jetbrains\.kotlin\.android[\"'\'']\s+version\s+[\"'\''])[0-9.]+([\"'\''])", r"\g<1>1.9.24\2", txt)
-              txt = re.sub(r"(ext\.kotlin_version\s*=\s*[\"'\''])[0-9.]+([\"'\''])", r"\g<1>1.9.24\2", txt)
+              txt = re.sub(r'(id\s+["\']org\.jetbrains\.kotlin\.android["\']\s+version\s+["\'])[0-9.]+(["\'])', r'\g<1>1.9.24\2', txt)
+              txt = re.sub(r'(ext\.kotlin_version\s*=\s*["\'])[0-9.]+(["\'])', r'\g<1>1.9.24\2', txt)
               open(gf, "w").write(txt)
-          '
+          PYEOF
+          python3 /tmp/patch_android.py
 
-      - name: Compile Release APK
+      - name: Analyze & Compile Release APK
+        working-directory: /tmp/shield_build
         run: |
-          cd flutter_shield
           flutter pub get
           flutter analyze --no-fatal-infos --no-fatal-warnings
           flutter build apk --release
@@ -53,4 +53,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ProjectShield-v4-APK
-          path: flutter_shield/build/app/outputs/flutter-apk/app-release.apk
+          path: /tmp/shield_build/build/app/outputs/flutter-apk/app-release.apk

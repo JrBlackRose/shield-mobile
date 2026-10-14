@@ -150,7 +150,6 @@ double? wilderRsi(List<double> closes, {int period = 14}) {
   return 100.0 - 100.0 / (1.0 + avgGain / avgLoss);
 }
 
-
 int _nyDayKey(DateTime utc) {
   final n = nyTime(utc);
   return n.year * 10000 + n.month * 100 + n.day;
@@ -1784,7 +1783,7 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
   }
 
 
-  // --- UI v4 Bridge Getters (connects ShieldController to main.dart) ---
+  // --- UI v4 Bridge Getters ---
   String? get updateVersion => latestVersion;
   bool get chatBusy => copilotBusy;
   Future<void> sendChat(String text) => sendCopilotMessage(text);
