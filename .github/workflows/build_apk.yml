@@ -19,11 +19,12 @@ jobs:
 
       - name: Scaffold Android, Bump Kotlin & Inject Permissions
         run: |
-          cp flutter_shield/lib/main.dart /tmp/main.dart
+          rm -rf /tmp/shield_lib
+          cp -r flutter_shield/lib /tmp/shield_lib
           cp flutter_shield/pubspec.yaml /tmp/pubspec.yaml
           rm -rf flutter_shield
           flutter create --org com.projectshield.trader --project-name shield --platforms android flutter_shield
-          cp /tmp/main.dart flutter_shield/lib/main.dart
+          cp -r /tmp/shield_lib/* flutter_shield/lib/
           cp /tmp/pubspec.yaml flutter_shield/pubspec.yaml
           rm -rf flutter_shield/test
           python3 -c '
@@ -51,5 +52,5 @@ jobs:
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ProjectShield-v3-APK
+          name: ProjectShield-v4-APK
           path: flutter_shield/build/app/outputs/flutter-apk/app-release.apk
