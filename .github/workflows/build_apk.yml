@@ -17,7 +17,7 @@ jobs:
           flutter-version: '3.24.0'
           channel: 'stable'
 
-      - name: Scaffold Android & Inject Permissions
+      - name: Scaffold Android, Bump Kotlin & Inject Permissions
         run: |
           cp flutter_shield/lib/main.dart /tmp/main.dart
           cp flutter_shield/pubspec.yaml /tmp/pubspec.yaml
@@ -27,11 +27,18 @@ jobs:
           cp /tmp/pubspec.yaml flutter_shield/pubspec.yaml
           rm -rf flutter_shield/test
           python3 -c '
+          import glob, re
           p = "flutter_shield/android/app/src/main/AndroidManifest.xml"
           s = open(p).read()
           if "android.permission.INTERNET" not in s:
               s = s.replace("<application", "<uses-permission android:name=\"android.permission.INTERNET\"/>\n    <application android:allowBackup=\"false\"")
           open(p, "w").write(s)
+
+          for gf in glob.glob("flutter_shield/android/**/*.gradle*", recursive=True):
+              txt = open(gf).read()
+              txt = re.sub(r"(id\s+[\"'\'']org\.jetbrains\.kotlin\.android[\"'\'']\s+version\s+[\"'\''])[0-9.]+([\"'\''])", r"\g<1>1.9.24\2", txt)
+              txt = re.sub(r"(ext\.kotlin_version\s*=\s*[\"'\''])[0-9.]+([\"'\''])", r"\g<1>1.9.24\2", txt)
+              open(gf, "w").write(txt)
           '
 
       - name: Compile Release APK
