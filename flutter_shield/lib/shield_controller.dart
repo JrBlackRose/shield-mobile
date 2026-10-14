@@ -978,7 +978,7 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
       if (!offHours) await _sessionGate(timeframe);
 
       final qs = await _liveQuote(sym);
-      if (!qs.fromSnapshot) {
+      if (!qs.fromSnapshot && !offHours) {
         if (qs.spreadBps >= 9999) throw PlanAbort('No valid two-sided quote for $sym. Trade aborted.');
         if (!spreadAllowed(qs.spreadBps, timeframe)) {
           throw RiskReject(
