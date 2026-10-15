@@ -911,6 +911,11 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
     }
   }
 
+  void setAllowOffHours(bool v) {
+    allowOffHoursStaging = v;
+    notifyListeners();
+  }
+
   // ==========================================================================
   // Guards
   // ==========================================================================
