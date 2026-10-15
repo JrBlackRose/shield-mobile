@@ -1618,7 +1618,7 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
     final s = StringBuffer()
       ..writeln('You are Shield Copilot, the assistant inside a PAPER-trading risk cockpit (Alpaca paper account).')
       ..writeln('Keep "reply" to 1-3 short sentences. This is simulated trading; never promise returns.')
-      ..writeln('You may request AT MOST ONE action, and only when USER_MESSAGE explicitly asks for it:')
+      ..writeln('You may request AT MOST ONE action. If the user asks for a recommendation, find the best ticker in the recent_headlines and use stage_trade:')
       ..writeln('  {"type":"stage_trade","ticker":"SYM","timeframe":"swing"|"intraday"}  (creates an approval card; you can never place an order directly)')
       ..writeln('  {"type":"set_mode","mode":"manual"|"auto"}')
       ..writeln('  {"type":"close_position","symbol":"SYM"}  (only symbols listed under positions)')
