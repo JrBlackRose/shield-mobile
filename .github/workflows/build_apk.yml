@@ -4,13 +4,40 @@ on: [push, workflow_dispatch]
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-java@v5
         with:
           distribution: 'zulu'
           java-version: '17'
+
+      - name: Setup Persistent Android Signing Key
+        run: |
+          mkdir -p ~/.android
+          if [ ! -f flutter_shield/shield.keystore ]; then
+            echo "Generating permanent keystore for the first time..."
+            keytool -genkeypair -v \
+              -keystore flutter_shield/shield.keystore \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add -f flutter_shield/shield.keystore
+            git commit -m "chore: save permanent Android signing keystore [skip ci]" || true
+            git pull --rebase origin main || true
+            git push origin HEAD:main || true
+          fi
+          cp flutter_shield/shield.keystore ~/.android/debug.keystore
 
       - uses: subosito/flutter-action@v2
         with:
@@ -26,7 +53,7 @@ jobs:
           cp flutter_shield/lib/*.dart /tmp/shield_build/lib/
 
           cat << 'PYEOF' > /tmp/patch_android.py
-          import glob, re
+          import glob, os, re
 
           p = "/tmp/shield_build/android/app/src/main/AndroidManifest.xml"
           s = open(p).read()
@@ -39,6 +66,12 @@ jobs:
               txt = re.sub(r'(id\s+["\']org\.jetbrains\.kotlin\.android["\']\s+version\s+["\'])[0-9.]+(["\'])', r'\g<1>1.9.24\2', txt)
               txt = re.sub(r'(ext\.kotlin_version\s*=\s*["\'])[0-9.]+(["\'])', r'\g<1>1.9.24\2', txt)
               open(gf, "w").write(txt)
+
+          ctrl = "/tmp/shield_build/lib/shield_controller.dart"
+          if os.path.exists(ctrl):
+              c_txt = open(ctrl, encoding="utf-8").read()
+              c_txt = c_txt.replace(".then((_) => scanNews(force: true))", ".then((_) => scanNews())")
+              open(ctrl, "w", encoding="utf-8").write(c_txt)
           PYEOF
           python3 /tmp/patch_android.py
 
