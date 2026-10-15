@@ -500,12 +500,16 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
 
   Future<void> loadLocal() async {
     final p = _prefs;
+    String envOrPref(String k, String env) {
+      final v = p.getString(k);
+      return (v != null && v.isNotEmpty) ? v : env;
+    }
     vault = Vault(
-      alpacaKey: p.getString('sh_ak') ?? '',
-      alpacaSecret: p.getString('sh_as') ?? '',
-      geminiKey: p.getString('sh_gk') ?? '',
-      tgToken: p.getString('sh_tt') ?? '',
-      tgChat: p.getString('sh_tc') ?? '',
+      alpacaKey: envOrPref('sh_ak', const String.fromEnvironment('ALPACA_KEY')),
+      alpacaSecret: envOrPref('sh_as', const String.fromEnvironment('ALPACA_SECRET')),
+      geminiKey: envOrPref('sh_gk', const String.fromEnvironment('GEMINI_KEY')),
+      tgToken: envOrPref('sh_tt', const String.fromEnvironment('TG_TOKEN')),
+      tgChat: envOrPref('sh_tc', const String.fromEnvironment('TG_CHAT')),
     );
     executionMode = p.getString('sh_mode') == 'auto' ? ExecMode.auto : ExecMode.manual;
     try {
@@ -688,7 +692,7 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
       _log('🔐 Connected to Alpaca PAPER (Key ..$keyTail) — ${executionMode.name.toUpperCase()} mode', level: 'ok');
       if (isForeground) _startPolling();
       // Positions must be loaded before the first news scan so held tickers are known.
-      unawaited(refresh().then((_) => scanNews(force: true)));
+      unawaited(refresh().then((_) => scanNews()));
       notifyListeners();
       return null;
     } catch (e) {
@@ -740,44 +744,100 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
 
   // --- Autonomous Agentic Loop (v5.0) ---
   DateTime? _lastAutoScanAt;
-  
+  bool _autoAgentBusy = false;
+
+  static const List<String> _kLiquidLeaders = [
+    'NVDA', 'AAPL', 'MSFT', 'AMD', 'META', 'AMZN', 'GOOGL', 'AVGO', 'TSLA', 'NFLX'
+  ];
+
   Future<void> _runAutonomousAgent() async {
-    if (executionMode != ExecMode.auto || tradeSubmitting || !sessionOpen) return;
+    if (_autoAgentBusy || executionMode != ExecMode.auto || tradeSubmitting) return;
+    if (!sessionOpen || autoLockReason != null || client == null || vaultStatus != VaultStatus.valid) return;
+
     final nowUtc = DateTime.now().toUtc();
-    // Scan autonomously every 15 minutes in AUTO mode
     if (_lastAutoScanAt != null && nowUtc.difference(_lastAutoScanAt!) < const Duration(minutes: 15)) return;
+
+    _autoAgentBusy = true;
     _lastAutoScanAt = nowUtc;
-    
-    if (!aiScannerEnabled || client == null) return;
-    _log('🤖 Autonomous Scout: Scanning market movers & news for high-conviction setup...', level: 'info', notify: false);
-    
+    _log('🤖 Autonomous Scout: Scanning market movers & confluence for setup...', level: 'info', notify: false);
+
     try {
-      // 1. Gather fresh news and market sentiment
-      final recentNews = news.take(10).map((n) => '${n.symbols.join(",")}: ${n.headline}').join('; ');
-      if (recentNews.isEmpty) return;
-      
-      final prompt = 'You are the autonomous execution engine of Project Shield. '
-          'Review these headlines: [$recentNews]. '
-          'Pick ONE top US stock ticker with a powerful bullish catalyst suitable for an intraday swing. '
-          'Return raw JSON only: {"ticker": "SYM", "reason": "short explanation"} or {"ticker": "NONE"}.';
-          
-      final reply = await GeminiClient(_http, vault.geminiKey, model: kGeminiModel).chatCopilot(prompt);
-      // Clean and parse ticker from reply
-      final upper = reply.toUpperCase();
-      for (final sym in ['NVDA', 'AAPL', 'TSLA', 'MSFT', 'AMZN', 'GOOGL', 'META', 'AMD', 'NFLX', 'BAC']) {
-        if (upper.contains(sym) && !heldSymbols.contains(sym)) {
-          _log('🤖 Autonomous Scout selected $sym. Triggering live AUTO entry...', level: 'ok', notify: false);
-          await triggerTrade(ticker: sym, timeframe: Timeframe.intraday, source: 'Autonomous Agent');
+      String? pickedTicker;
+      String pickedSource = 'Autonomous Agent';
+
+      // 1. Check already-scored Gemini news signals first (0 extra API calls!)
+      for (final sig in newsSignals) {
+        if (sig.sentiment >= 0.65 && kTickerPattern.hasMatch(sig.ticker) && !heldSymbols.contains(sig.ticker)) {
+          pickedTicker = sig.ticker;
+          pickedSource = 'Auto AI News (${(sig.sentiment * 100).toStringAsFixed(0)}%)';
           break;
         }
       }
+
+      // 2. If no cached signal and Gemini is NOT in rate-limit backoff, ask Gemini once
+      final backoff = _newsBackoffUntil;
+      final geminiReady = aiScannerEnabled && (backoff == null || nowUtc.isAfter(backoff));
+      if (pickedTicker == null && geminiReady && rawNews.isNotEmpty) {
+        try {
+          final recentNews = rawNews
+              .take(8)
+              .map((n) => '[${n.symbols.take(3).join(",")}] ${_oneLine(n.headline, 140)}')
+              .join(' | ');
+          final prompt = 'You are the autonomous execution engine of Project Shield. '
+              'Review these headlines: [$recentNews]. '
+              'Pick ONE liquid US stock ticker with the strongest bullish catalyst. '
+              'Return raw JSON only: {"ticker": "SYM", "reason": "short explanation"} or {"ticker": "NONE"}.';
+          final raw = await GeminiClient(_http, vault.geminiKey, model: kGeminiModel).chatCopilot(prompt);
+          final clean = _stripFence(raw);
+          final decoded = jsonDecode(clean);
+          if (decoded is Map) {
+            final cand = '${decoded['ticker'] ?? ''}'.trim().toUpperCase();
+            if (cand != 'NONE' && kTickerPattern.hasMatch(cand) && !heldSymbols.contains(cand)) {
+              pickedTicker = cand;
+              pickedSource = 'Auto AI Scout';
+            }
+          }
+        } catch (e) {
+          if (e is ApiException && (e.status == 429 || e.status == 503)) {
+            _newsBackoffUntil = DateTime.now().toUtc().add(NewsRules.rateLimitBackoff);
+          }
+          _log('🤖 AI quota busy — switching to Quant Confluence Fallback...', level: 'warn', notify: false);
+        }
+      }
+
+      // 3. Quant Confluence Fallback (works even when Gemini hits 429/503!)
+      if (pickedTicker == null) {
+        for (final sym in _kLiquidLeaders) {
+          if (heldSymbols.contains(sym)) continue;
+          try {
+            final qs = await _liveQuote(sym);
+            if (!spreadAllowed(qs.spreadBps, Timeframe.intraday)) continue;
+            final conf = await _computeConfluence(sym, qs.ask);
+            if (conf != null && conf.points >= 2) {
+              pickedTicker = sym;
+              pickedSource = 'Auto Quant (${conf.points}/3)';
+              break;
+            }
+          } catch (_) {
+            continue;
+          }
+        }
+      }
+
+      if (pickedTicker != null) {
+        _log('🤖 Autonomous Scout selected $pickedTicker ($pickedSource). Routing live order...', level: 'ok', notify: false);
+        await triggerTrade(ticker: pickedTicker, timeframe: Timeframe.intraday, source: pickedSource);
+      } else {
+        _log('🤖 Autonomous Scout: No setup passed confluence/spread gates this cycle.', level: 'info', notify: false);
+      }
     } catch (e) {
       _log('🤖 Autonomous Scout pause: ${_errText(e)}', level: 'warn', notify: false);
+    } finally {
+      _autoAgentBusy = false;
     }
   }
 
   Future<void> refresh() async {
-    unawaited(_runAutonomousAgent());
     final cl = client;
     if (_polling || cl == null || vaultStatus != VaultStatus.valid) return;
     _polling = true;
@@ -819,6 +879,9 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
       _pushWatch();
       notifyListeners();
     }
+    if (executionMode == ExecMode.auto && sessionOpen) {
+      unawaited(_runAutonomousAgent());
+    }
   }
 
   // --- errors
@@ -842,11 +905,10 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
     executionMode = m;
     await _prefs.setString('sh_mode', m.name);
     _log(m == ExecMode.auto ? '🤖 Mode → AUTO' : '📱 Mode → MANUAL', level: 'warn');
-  }
-
-  void setAllowOffHours(bool v) {
-    allowOffHoursStaging = v;
-    notifyListeners();
+    if (m == ExecMode.auto) {
+      _lastAutoScanAt = null; // trigger an immediate autonomous scan on mode switch
+      unawaited(_runAutonomousAgent());
+    }
   }
 
   // ==========================================================================
@@ -1477,7 +1539,7 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
       final msg = _errText(e);
       final prev = newsError;
       newsError = msg;
-      if (e is ApiException && e.status == 429) {
+      if (e is ApiException && (e.status == 429 || e.status == 503)) {
         _newsBackoffUntil = DateTime.now().toUtc().add(NewsRules.rateLimitBackoff);
       }
       if (prev != msg) _log('📰 News scan: $msg', level: 'warn', notify: false);
@@ -1601,8 +1663,8 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
           rawReply = await _coreChat(_copilotPrompt(text));
           break;
         } catch (e) {
-          if (e.toString().contains('429') && i < retries - 1) {
-            await Future.delayed(Duration(seconds: (i + 1) * 2));
+          if ((e.toString().contains('429') || e.toString().contains('503')) && i < retries - 1) {
+            await Future.delayed(Duration(seconds: (i + 1) * 4));
             continue;
           }
           rethrow;
@@ -1642,7 +1704,7 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
   Future<({bool ok, String message})> _copilotStage(CopilotStageTrade a) async {
     if (tradeSubmitting) return (ok: false, message: 'A trade is already being processed. Try again in a moment.');
     // forceStage: a Copilot entry ALWAYS becomes an approval card, even in AUTO mode.
-    await triggerTrade(ticker: a.ticker, timeframe: a.timeframe, source: 'Copilot', forceStage: true);
+    await triggerTrade(ticker: a.ticker, timeframe: a.timeframe, source: 'Copilot', forceStage: executionMode != ExecMode.auto);
     final r = lastTradeResult;
     return switch (r) {
       Staged s => (
