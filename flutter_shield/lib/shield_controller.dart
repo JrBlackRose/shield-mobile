@@ -1554,7 +1554,21 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
     _addChat(CopilotRole.user, text);
     notifyListeners();
     try {
-      final reply = parseCopilotReply(await _coreChat(_copilotPrompt(text)));
+      String rawReply = '';
+      int retries = 3;
+      for (int i = 0; i < retries; i++) {
+        try {
+          rawReply = await _coreChat(_copilotPrompt(text));
+          break;
+        } catch (e) {
+          if (e.toString().contains('429') && i < retries - 1) {
+            await Future.delayed(Duration(seconds: (i + 1) * 2));
+            continue;
+          }
+          rethrow;
+        }
+      }
+      final reply = parseCopilotReply(rawReply);
       final action = reply.action;
       if (reply.text.isNotEmpty) {
         _addChat(CopilotRole.assistant, reply.text);
