@@ -1792,6 +1792,11 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
             'now ${priceStr(p.currentPrice)}, P/L ${usd(p.unrealizedPl, sign: true)}');
       }
     }
+    final aiEntries = auditLog.where((e) => e.message.contains('Auto AI News')).length;
+    final quantEntries = auditLog.where((e) => e.message.contains('Auto Quant')).length;
+    final spreadBlocks = auditLog.where((e) => e.message.contains('Spread ') && e.message.contains('exceeds')).length;
+    final autoDefenses = auditLog.where((e) => e.message.contains('AUTO DEFENSE')).length;
+    b.writeln('session_telemetry: ai_news_triggers=$aiEntries, quant_triggers=$quantEntries, spread_rejections=$spreadBlocks, auto_defenses=$autoDefenses');
     if (_rawOrders.isEmpty) {
       b.writeln('open_orders: none');
     } else {
