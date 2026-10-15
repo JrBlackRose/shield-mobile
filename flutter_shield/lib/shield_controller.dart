@@ -737,7 +737,47 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
   // Polling: account + positions + orders + clock (5 s, foreground only)
   // ==========================================================================
 
+
+  // --- Autonomous Agentic Loop (v5.0) ---
+  DateTime? _lastAutoScanAt;
+  
+  Future<void> _runAutonomousAgent() async {
+    if (executionMode != ExecMode.auto || tradeSubmitting || !sessionOpen) return;
+    final nowUtc = DateTime.now().toUtc();
+    // Scan autonomously every 15 minutes in AUTO mode
+    if (_lastAutoScanAt != null && nowUtc.difference(_lastAutoScanAt!) < const Duration(minutes: 15)) return;
+    _lastAutoScanAt = nowUtc;
+    
+    if (!aiScannerEnabled || client == null) return;
+    _log('🤖 Autonomous Scout: Scanning market movers & news for high-conviction setup...', level: 'info', notify: false);
+    
+    try {
+      // 1. Gather fresh news and market sentiment
+      final recentNews = news.take(10).map((n) => '${n.symbols.join(",")}: ${n.headline}').join('; ');
+      if (recentNews.isEmpty) return;
+      
+      final prompt = 'You are the autonomous execution engine of Project Shield. '
+          'Review these headlines: [$recentNews]. '
+          'Pick ONE top US stock ticker with a powerful bullish catalyst suitable for an intraday swing. '
+          'Return raw JSON only: {"ticker": "SYM", "reason": "short explanation"} or {"ticker": "NONE"}.';
+          
+      final reply = await GeminiClient(_http, vault.geminiKey, model: kGeminiModel).chatCopilot(prompt);
+      // Clean and parse ticker from reply
+      final upper = reply.toUpperCase();
+      for (final sym in ['NVDA', 'AAPL', 'TSLA', 'MSFT', 'AMZN', 'GOOGL', 'META', 'AMD', 'NFLX', 'BAC']) {
+        if (upper.contains(sym) && !heldSymbols.contains(sym)) {
+          _log('🤖 Autonomous Scout selected $sym. Triggering live AUTO entry...', level: 'ok', notify: false);
+          await triggerTrade(ticker: sym, timeframe: Timeframe.intraday, source: 'Autonomous Agent');
+          break;
+        }
+      }
+    } catch (e) {
+      _log('🤖 Autonomous Scout pause: ${_errText(e)}', level: 'warn', notify: false);
+    }
+  }
+
   Future<void> refresh() async {
+    unawaited(_runAutonomousAgent());
     final cl = client;
     if (_polling || cl == null || vaultStatus != VaultStatus.valid) return;
     _polling = true;
