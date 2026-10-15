@@ -659,6 +659,10 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
     if (notify) notifyListeners();
   }
 
+  void auditLog(String msg, {String level = 'info', bool notify = false}) {
+    _log(msg, level: level, notify: notify);
+  }
+
   // ==========================================================================
   // Vault & keystore (sh_ak, sh_as, sh_gk)
   // ==========================================================================
