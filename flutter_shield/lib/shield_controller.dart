@@ -62,13 +62,13 @@ abstract final class ConfluenceRules {
 abstract final class NewsRules {
   static const String endpoint = 'https://data.alpaca.markets/v1beta1/news';
   static const double bearishSentiment = 0.35; // <= this on a held ticker => HELD POSITION AT RISK
-  static const int pollSec = 60;
-  static const Duration minGap = Duration(seconds: 30);
+  static const int pollSec = 300;
+  static const Duration minGap = Duration(minutes: 2);
   static const Duration heldLookback = Duration(hours: 24);
   static const Duration marketLookback = Duration(hours: 3);
   static const Duration rateLimitBackoff = Duration(minutes: 5);
-  static const int fetchLimit = 30;
-  static const int scoreBatch = 12;
+  static const int fetchLimit = 20;
+  static const int scoreBatch = 5;
   static const int keepHeadlines = 40;
   static const int keepSignals = 40;
   static const int keepAlerts = 20;
