@@ -20,7 +20,6 @@ jobs:
         run: |
           mkdir -p ~/.android
           if [ ! -f flutter_shield/shield.keystore ]; then
-            echo "Generating permanent keystore for the first time..."
             keytool -genkeypair -v \
               -keystore flutter_shield/shield.keystore \
               -storepass android \
@@ -44,7 +43,7 @@ jobs:
           flutter-version: '3.24.0'
           channel: 'stable'
 
-      - name: Assemble Clean Flutter Project & Configure Android
+      - name: Assemble Clean Flutter Project & Configure Android Native Bridge
         run: |
           rm -rf /tmp/shield_build
           flutter create --org com.projectshield.trader --project-name shield --platforms android /tmp/shield_build
@@ -57,8 +56,14 @@ jobs:
 
           p = "/tmp/shield_build/android/app/src/main/AndroidManifest.xml"
           s = open(p).read()
-          if "android.permission.INTERNET" not in s:
-              s = s.replace("<application", '<uses-permission android:name="android.permission.INTERNET"/>\n    <application android:allowBackup="false"')
+          perms = '''<uses-permission android:name="android.permission.INTERNET"/>
+              <uses-permission android:name="android.permission.WAKE_LOCK"/>
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+              <uses-permission android:name="android.permission.VIBRATE"/>
+              <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>'''
+          if "android.permission.POST_NOTIFICATIONS" not in s:
+              s = s.replace("<application", perms + '\n    <application android:allowBackup="false"')
           open(p, "w").write(s)
 
           for gf in glob.glob("/tmp/shield_build/android/**/*.gradle*", recursive=True):
@@ -67,11 +72,120 @@ jobs:
               txt = re.sub(r'(ext\.kotlin_version\s*=\s*["\'])[0-9.]+(["\'])', r'\g<1>1.9.24\2', txt)
               open(gf, "w").write(txt)
 
-          ctrl = "/tmp/shield_build/lib/shield_controller.dart"
-          if os.path.exists(ctrl):
-              c_txt = open(ctrl, encoding="utf-8").read()
-              c_txt = c_txt.replace(".then((_) => scanNews(force: true))", ".then((_) => scanNews())")
-              open(ctrl, "w", encoding="utf-8").write(c_txt)
+          # Write Native Kotlin MethodChannel for OS Notifications & Background WakeLock
+          kt_files = glob.glob("/tmp/shield_build/android/app/src/main/kotlin/**/MainActivity.kt", recursive=True)
+          if kt_files:
+              kt_code = '''package com.projectshield.trader.shield
+
+          import android.Manifest
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.content.Context
+          import android.content.Intent
+          import android.content.pm.PackageManager
+          import android.net.Uri
+          import android.os.Build
+          import android.os.Bundle
+          import android.os.PowerManager
+          import android.provider.Settings
+          import androidx.core.app.ActivityCompat
+          import androidx.core.app.NotificationCompat
+          import io.flutter.embedding.android.FlutterActivity
+          import io.flutter.embedding.engine.FlutterEngine
+          import io.flutter.plugin.common.MethodChannel
+
+          class MainActivity: FlutterActivity() {
+              private val CHANNEL = "shield/native"
+              private val CHANNEL_ID = "shield_high_alerts"
+              private var wakeLock: PowerManager.WakeLock? = null
+              private var notifId = 100
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  createNotificationChannel()
+                  requestNotificationPermission()
+              }
+
+              override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
+                  super.configureFlutterEngine(flutterEngine)
+                  MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
+                      when (call.method) {
+                          "notify" -> {
+                              val title = call.argument<String>("title") ?: "Project Shield Alert"
+                              val body = call.argument<String>("body") ?: ""
+                              showNotification(title, body)
+                              result.success(true)
+                          }
+                          "startBackground" -> {
+                              acquireWakeLock()
+                              requestIgnoreBatteryOptimizations()
+                              result.success(true)
+                          }
+                          else -> result.notImplemented()
+                      }
+                  }
+              }
+
+              private fun createNotificationChannel() {
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                      val channel = NotificationChannel(
+                          CHANNEL_ID,
+                          "Shield Autonomous Alerts",
+                          NotificationManager.IMPORTANCE_HIGH
+                      ).apply {
+                          description = "High-priority alerts and autonomous trade notifications"
+                          enableVibration(true)
+                      }
+                      val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                      nm.createNotificationChannel(channel)
+                  }
+              }
+
+              private fun requestNotificationPermission() {
+                  if (Build.VERSION.SDK_INT >= 33) {
+                      if (ActivityCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                          ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.POST_NOTIFICATIONS), 101)
+                      }
+                  }
+              }
+
+              private fun showNotification(title: String, body: String) {
+                  val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                  val builder = NotificationCompat.Builder(this, CHANNEL_ID)
+                      .setSmallIcon(android.R.drawable.ic_dialog_info)
+                      .setContentTitle(title)
+                      .setContentText(body)
+                      .setStyle(NotificationCompat.BigTextStyle().bigText(body))
+                      .setPriority(NotificationCompat.PRIORITY_HIGH)
+                      .setDefaults(NotificationCompat.DEFAULT_ALL)
+                      .setAutoCancel(true)
+                  nm.notify(notifId++, builder.build())
+              }
+
+              private fun acquireWakeLock() {
+                  if (wakeLock == null) {
+                      val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+                      wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Shield::AutonomousWakeLock")
+                      wakeLock?.acquire()
+                  }
+              }
+
+              private fun requestIgnoreBatteryOptimizations() {
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                      val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+                      if (!pm.isIgnoringBatteryOptimizations(packageName)) {
+                          try {
+                              val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                                  data = Uri.parse("package:$packageName")
+                              }
+                              startActivity(intent)
+                          } catch (_: Exception) {}
+                      }
+                  }
+              }
+          }
+          '''
+              open(kt_files[0], "w").write(kt_code)
           PYEOF
           python3 /tmp/patch_android.py
 
