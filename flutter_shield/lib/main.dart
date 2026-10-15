@@ -264,6 +264,7 @@ class _ShieldHomeState extends State<ShieldHome> {
               icon: const Badge(smallSize: 8, backgroundColor: Pal.amber, child: Icon(Icons.system_update_alt, color: Pal.amber)),
               onPressed: _showUpdate,
             ),
+          IconButton(tooltip: 'Field Manual', icon: const Icon(Icons.help_outline), onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const FieldManualScreen()))),
           IconButton(tooltip: 'Key Vault', icon: const Icon(Icons.vpn_key_outlined), onPressed: _openVault),
           IconButton(tooltip: 'Watch HUD', icon: const Icon(Icons.watch_outlined), onPressed: _openWatch),
         ],
@@ -2195,4 +2196,113 @@ class WatchPreviewScreen extends StatelessWidget {
           ]),
         ),
       );
+}
+
+
+// ============================================================================
+// FIELD MANUAL (GUIDE)
+// ============================================================================
+
+class FieldManualScreen extends StatelessWidget {
+  const FieldManualScreen({super.key});
+
+  Widget _guideSection(String title, IconData icon, Color color, List<Widget> content) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 16),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(color: Pal.surface, borderRadius: BorderRadius.circular(12), border: Border.all(color: _a(color, 0.5))),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Icon(icon, color: color, size: 22),
+          const SizedBox(width: 8),
+          Text(title, style: TextStyle(color: color, fontSize: 16, fontWeight: FontWeight.w800)),
+        ]),
+        const Padding(padding: EdgeInsets.symmetric(vertical: 8), child: Divider()),
+        ...content,
+      ]),
+    );
+  }
+
+  Widget _bullet(String title, String desc) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        const Text('• ', style: TextStyle(color: Pal.emerald, fontSize: 18, fontWeight: FontWeight.w800)),
+        Expanded(
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(title, style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 13, color: Pal.text)),
+            const SizedBox(height: 2),
+            Text(desc, style: const TextStyle(color: Pal.muted, fontSize: 12, height: 1.4)),
+          ]),
+        ),
+      ]),
+    );
+  }
+
+  Widget _promptExample(String prompt) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 6),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      decoration: BoxDecoration(color: Pal.bg, borderRadius: BorderRadius.circular(6), border: Border.all(color: Pal.border)),
+      child: Row(children: [
+        const Icon(Icons.chat_bubble_outline, size: 14, color: Pal.sky),
+        const SizedBox(width: 8),
+        Expanded(child: Text('"$prompt"', style: const TextStyle(fontFamily: 'monospace', fontSize: 12, color: Pal.sky))),
+      ]),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('📖 Shield Field Manual', style: TextStyle(fontWeight: FontWeight.w800))),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          const Text('Welcome to Project Shield', style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800)),
+          const SizedBox(height: 6),
+          const Text(
+            'This is not a normal trading app. It is an algorithmic risk cockpit. It prevents you from blowing up your account by strictly enforcing mathematical rules and reading live institutional order flow.',
+            style: TextStyle(color: Pal.muted, fontSize: 13, height: 1.5),
+          ),
+          const SizedBox(height: 20),
+
+          _guideSection('🤖 1. The AI Copilot', Icons.smart_toy, Pal.sky, [
+            const Text('The Copilot doesn\'t just chat—it physically controls the app for you. You can ask it to analyze your risk or stage trades.', style: TextStyle(color: Pal.text, fontSize: 12.5)),
+            const SizedBox(height: 10),
+            _promptExample('How is my risk right now?'),
+            _promptExample('Stage a swing trade for NVDA.'),
+            _promptExample('Trim my TSLA position.'),
+            _promptExample('Are there any bad news for the stocks I own?'),
+          ]),
+
+          _guideSection('📐 2. The Risk Math (Why You Cannot YOLO)', Icons.calculate, Pal.emerald, [
+            _bullet('1% Risk Budget', 'The app automatically calculates your share size so that if your Stop Loss is hit, you only ever lose exactly 1% of your total account equity.'),
+            _bullet('15% Notional Cap', 'Even if a stock has a tight stop loss, the app will never let you put more than 15% of your total money into a single trade.'),
+            _bullet('-2.5% Daily Drawdown Halt', 'If you lose 2.5% of your equity in a single day, the system physically locks your account to prevent revenge trading.'),
+          ]),
+
+          _guideSection('📰 3. News & Bearish Defense', Icons.newspaper, Pal.amber, [
+            const Text('The app streams live Benzinga institutional news and grades it with Gemini AI.', style: TextStyle(color: Pal.text, fontSize: 12.5)),
+            const SizedBox(height: 10),
+            _bullet('Automated Defense', 'If a severe bearish headline drops for a stock you currently hold in your portfolio, the app spawns a massive red alert card with a 1-tap "Close Position" button.'),
+            _bullet('Trap Filter', 'If you ask the AI to trade a stock, but the live news is secretly bearish, the AI will veto the trade to protect you.'),
+          ]),
+
+          _guideSection('🚀 4. Staging a Trade', Icons.show_chart, Pal.indigo, [
+            _bullet('The +15 bps Limit Collar', 'Shield never uses Market Orders (which suffer massive slippage). It uses a +0.15% limit collar to guarantee you get a fair entry price, or it cancels.'),
+            _bullet('Confluence Score', 'Before you approve a card, the app checks the 5-minute chart. It scores the trade from 0-100 based on VWAP, RSI, and Volume Surges.'),
+          ]),
+
+          _guideSection('🚨 5. The Emergency Kill Switch', Icons.warning, Pal.dangerSoft, [
+            const Text('Located on the Cockpit tab and the Watch HUD. Press and HOLD the red button for 2 seconds to instantly cancel all open orders and market-sell all open positions to cash. Use this during flash crashes.', style: TextStyle(color: Pal.text, fontSize: 12.5, height: 1.4)),
+          ]),
+          
+          const SizedBox(height: 20),
+          const Center(child: Text('Built by Project Shield', style: TextStyle(color: Pal.border, fontWeight: FontWeight.w800, fontSize: 12))),
+          const SizedBox(height: 20),
+        ],
+      ),
+    );
+  }
 }
