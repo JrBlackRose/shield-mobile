@@ -2235,11 +2235,12 @@ class _NewsScorer {
         'Return raw JSON only: {"results":[{"id":"<id>","ticker":"SYM_OR_NONE","sentiment":0.0_to_1.0,"reason":"max 120 chars"}]}\n'
         'HEADLINES:\n$lines';
 
+    // --- NEW MULTI-MODEL FAILOVER LOOP STARTS HERE ---
     final models = <String>{
       kGeminiModel,
+      'gemini-3.8-flash',
       'gemini-2.5-flash',
       'gemini-2.0-flash',
-      'gemini-2.0-flash-lite',
     }.toList();
 
     http.Response? res;
@@ -2262,7 +2263,9 @@ class _NewsScorer {
           )
           .timeout(_kV4Timeout);
       if (res.statusCode == 200) break;
-      if ((res.statusCode == 503 || res.statusCode == 429 || res.statusCode == 500) && i < models.length - 1) {
+      
+      // Added 404 so if a model is deprecated/not found, it safely skips to the next one
+      if ((res.statusCode == 503 || res.statusCode == 429 || res.statusCode == 500 || res.statusCode == 404) && i < models.length - 1) {
         await Future<void>.delayed(Duration(milliseconds: 800 * (i + 1)));
         continue;
       }
