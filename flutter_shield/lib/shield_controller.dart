@@ -659,10 +659,6 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
     if (notify) notifyListeners();
   }
 
-  void auditLog(String msg, {String level = 'info', bool notify = false}) {
-    _log(msg, level: level, notify: notify);
-  }
-
   // ==========================================================================
   // Vault & keystore (sh_ak, sh_as, sh_gk)
   // ==========================================================================
@@ -1796,10 +1792,10 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
             'now ${priceStr(p.currentPrice)}, P/L ${usd(p.unrealizedPl, sign: true)}');
       }
     }
-    final aiEntries = auditLog.where((e) => e.message.contains('Auto AI News')).length;
-    final quantEntries = auditLog.where((e) => e.message.contains('Auto Quant')).length;
-    final spreadBlocks = auditLog.where((e) => e.message.contains('Spread ') && e.message.contains('exceeds')).length;
-    final autoDefenses = auditLog.where((e) => e.message.contains('AUTO DEFENSE')).length;
+    final aiEntries = feed.where((e) => e.text.contains('Auto AI News')).length;
+    final quantEntries = feed.where((e) => e.text.contains('Auto Quant')).length;
+    final spreadBlocks = feed.where((e) => e.text.contains('Spread ') && e.message.contains('exceeds')).length;
+    final autoDefenses = feed.where((e) => e.text.contains('AUTO DEFENSE')).length;
     b.writeln('session_telemetry: ai_news_triggers=$aiEntries, quant_triggers=$quantEntries, spread_rejections=$spreadBlocks, auto_defenses=$autoDefenses');
     if (_rawOrders.isEmpty) {
       b.writeln('open_orders: none');
