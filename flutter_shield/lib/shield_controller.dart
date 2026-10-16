@@ -1076,13 +1076,26 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
       }
       final plan = buildBracketPlan(equity: acct.equity, ask: qs.ask, timeframe: timeframe);
       final conf = await _computeConfluence(sym, qs.ask);
+      if (conf != null) {
+        lastConfluence = conf;
+        _log('📊 $sym ${conf.summary}', notify: false);
+      }
+
+      // Hard Quantitative Confluence Gate: require >= 2/3 during live sessions
+      if (!offHours && !qs.fromSnapshot && (conf == null || conf.points < 2)) {
+        throw RiskReject(
+          'Confluence ${conf?.points ?? 0}/3 WEAK (requires ≥ 2/3). Trade blocked for $sym.',
+        );
+      }
+
       final token = _newToken();
-      // AUTO fires only on a live-priced, in-session, unlocked, non-forced entry.
+      // AUTO fires only on a live-priced, in-session, unlocked, non-forced entry with >= 2/3 confluence.
       final auto = executionMode == ExecMode.auto &&
           !forceStage &&
           !offHours &&
           !qs.fromSnapshot &&
-          autoLockReason == null;
+          autoLockReason == null &&
+          conf.points >= 2;
 
       if (auto) {
         final order = await _submitWithRecovery(
