@@ -1091,11 +1091,11 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
       final token = _newToken();
       // AUTO fires only on a live-priced, in-session, unlocked, non-forced entry with >= 2/3 confluence.
       final auto = executionMode == ExecMode.auto &&
-          !forceStage &&
-          !offHours &&
-          !qs.fromSnapshot &&
-          autoLockReason == null &&
-          conf.points >= 2;
+       !forceStage &&
+       !offHours &&
+       !qs.fromSnapshot &&
+       autoLockReason == null &&
+       (conf?.points ?? 0) >= 2;
 
       if (auto) {
         final order = await _submitWithRecovery(
