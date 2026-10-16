@@ -1,6 +1,5 @@
 {
-  "version": "4.0.0",
-  "build_number": 4,
-  "release_notes": "v4.0: AI UI Copilot Chat, Live Alpaca News Feed, Held-Position Bearish Defense Alerts, VWAP/RSI Trade Confluence, and Auto-Update Checker.",
-  "apk_url": "https://github.com/JrBlackRose/shield-mobile/releases/latest/download/app-release.apk"
+  "version": "4.2.0",
+  "build": 5,
+  "notes": "Project Shield v4.2 \u2014 Native Android ForegroundService, OS Push Notifications, Auto Risk Defense with mutex guard, and Copilot Order Queue control."
 }

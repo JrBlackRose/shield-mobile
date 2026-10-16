@@ -445,9 +445,26 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
   static const MethodChannel _native = MethodChannel('shield/native');
   List<Map<String, dynamic>> _rawOrders = [];
 
+  final Set<String> _defenseInFlight = <String>{};
+
   Future<void> _notifyOS(String title, String body) async {
     try {
       await _native.invokeMethod('notify', {'title': title, 'body': body});
+    } catch (_) {}
+    unawaited(_sendTelegramIfConfigured('$title\n$body'));
+  }
+
+  Future<void> _sendTelegramIfConfigured(String text) async {
+    final tok = tgToken.trim();
+    final cid = tgChat.trim();
+    if (tok.isEmpty || cid.isEmpty) return;
+    try {
+      final uri = Uri.parse('https://api.telegram.org/bot$tok/sendMessage');
+      await http.post(
+        uri,
+        headers: const {'Content-Type': 'application/json'},
+        body: jsonEncode({'chat_id': cid, 'text': text}),
+      ).timeout(const Duration(seconds: 6));
     } catch (_) {}
   }
 
@@ -1624,7 +1641,10 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
 
   Future<void> _executeAutoRiskDefense(String ticker, double sentiment, String reason) async {
     final sym = ticker.trim().toUpperCase();
-    _log('🛡️ AUTO DEFENSE triggered for $sym (sentiment ${sentiment.toStringAsFixed(2)}): taking protective action...', level: 'warn');
+    if (_defenseInFlight.contains(sym)) return;
+    _defenseInFlight.add(sym);
+    try {
+      _log('🛡️ AUTO DEFENSE triggered for $sym (sentiment ${sentiment.toStringAsFixed(2)}): taking protective action...', level: 'warn');
     if (heldSymbols.contains(sym)) {
       final res = await closePosition(sym);
       final title = res.ok ? '🛡️ AUTO DEFENSE: Closed $sym' : '⚠️ AUTO DEFENSE FAILED: $sym';
@@ -1637,6 +1657,9 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
       final body = '${res.message} — Trigger: $reason';
       toast('$title: $body', !res.ok);
       await _notifyOS(title, body);
+    }
+    } finally {
+      _defenseInFlight.remove(sym);
     }
   }
 

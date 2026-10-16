@@ -1,7 +1,7 @@
 name: shield
 description: Project Shield v3.0 - standalone BYOK paper-trading risk cockpit (Alpaca + Gemini).
 publish_to: 'none'
-version: 3.0.0+1
+version: 4.2.0+5
 
 environment:
   # Dart 3 is required: sealed classes, records, switch expressions, `abstract final class`.
