@@ -455,8 +455,8 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   Future<void> _sendTelegramIfConfigured(String text) async {
-    final tok = tgToken.trim();
-    final cid = tgChat.trim();
+    final tok = vault.tgToken.trim();
+    final cid = vault.tgChat.trim();
     if (tok.isEmpty || cid.isEmpty) return;
     try {
       final uri = Uri.parse('https://api.telegram.org/bot$tok/sendMessage');
