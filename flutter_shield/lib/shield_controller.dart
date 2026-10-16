@@ -1722,7 +1722,7 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
           rawReply = await _coreChat(_copilotPrompt(text));
           break;
         } catch (e) {
-          if (e.toString().contains('429') && i < retries - 1) {
+          if ((e.toString().contains('429') || e.toString().contains('503')) && i < retries - 1) {
             await Future.delayed(Duration(seconds: (i + 1) * 2));
             continue;
           }
@@ -2235,28 +2235,47 @@ class _NewsScorer {
         'Return raw JSON only: {"results":[{"id":"<id>","ticker":"SYM_OR_NONE","sentiment":0.0_to_1.0,"reason":"max 120 chars"}]}\n'
         'HEADLINES:\n$lines';
 
-    final res = await _http
-        .post(
-          Uri.parse('https://generativelanguage.googleapis.com/v1beta/models/$kGeminiModel:generateContent'),
-          headers: {'x-goog-api-key': _key, 'Content-Type': 'application/json'},
-          body: jsonEncode({
-            'contents': [
-              {
-                'parts': [
-                  {'text': prompt}
-                ]
-              }
-            ],
-            'generationConfig': {'responseMimeType': 'application/json', 'temperature': 0.2},
-          }),
-        )
-        .timeout(_kV4Timeout);
-    if (res.statusCode != 200) {
-      var msg = 'HTTP ${res.statusCode}';
+    final models = <String>{
+      kGeminiModel,
+      'gemini-2.5-flash',
+      'gemini-2.0-flash',
+      'gemini-2.0-flash-lite',
+    }.toList();
+
+    http.Response? res;
+    for (var i = 0; i < models.length; i++) {
+      final m = models[i];
+      res = await _http
+          .post(
+            Uri.parse('https://generativelanguage.googleapis.com/v1beta/models/$m:generateContent'),
+            headers: {'x-goog-api-key': _key, 'Content-Type': 'application/json'},
+            body: jsonEncode({
+              'contents': [
+                {
+                  'parts': [
+                    {'text': prompt}
+                  ]
+                }
+              ],
+              'generationConfig': {'responseMimeType': 'application/json', 'temperature': 0.2},
+            }),
+          )
+          .timeout(_kV4Timeout);
+      if (res.statusCode == 200) break;
+      if ((res.statusCode == 503 || res.statusCode == 429 || res.statusCode == 500) && i < models.length - 1) {
+        await Future<void>.delayed(Duration(milliseconds: 800 * (i + 1)));
+        continue;
+      }
+      break;
+    }
+
+    if (res == null || res.statusCode != 200) {
+      final code = res?.statusCode ?? 503;
+      var msg = 'HTTP $code';
       try {
-        msg = (jsonDecode(res.body)['error']['message'] ?? msg).toString();
+        if (res != null) msg = (jsonDecode(res.body)['error']['message'] ?? msg).toString();
       } catch (_) {}
-      throw ApiException('Gemini', res.statusCode, msg);
+      throw ApiException('Gemini', code, msg);
     }
     try {
       final outer = jsonDecode(res.body) as Map<String, dynamic>;
