@@ -253,10 +253,11 @@ bool spreadAllowed(double spreadBps, Timeframe tf) => spreadBps <= maxSpreadBps(
 const int kPollSec = 5;
 const Duration kCardTtl = Duration(minutes: 5);
 const String kGeminiModel = 'gemini-2.5-flash';
+const String kGeminiModel = 'gemini-3.5-flash-lite';
 const List<String> kGeminiFallbackModels = [
+  'gemini-3.5-flash-lite',
   'gemini-2.5-flash',
-  'gemini-2.5-flash-lite',
-  'gemini-2.5-flash-lite',
+  'gemini-2.0-flash',
 ];
 const int kFeedMax = 15;
 const String kPaperBase = 'https://paper-api.alpaca.markets/v2';
