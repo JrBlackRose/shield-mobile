@@ -256,7 +256,7 @@ const String kGeminiModel = 'gemini-2.5-flash';
 const List<String> kGeminiFallbackModels = [
   'gemini-2.5-flash',
   'gemini-2.5-flash-lite',
-  'gemini-2.0-flash',
+  'gemini-2.5-flash-lite',
 ];
 const int kFeedMax = 15;
 const String kPaperBase = 'https://paper-api.alpaca.markets/v2';
