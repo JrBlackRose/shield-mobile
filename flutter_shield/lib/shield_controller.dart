@@ -1950,7 +1950,7 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
         _newsBackoffUntil = DateTime.now().toUtc().add(NewsRules.rateLimitBackoff);
       }
       if (prev != msg) _log('📰 News scan: $msg', level: 'warn', notify: false);
-      if (force) toast(msg, true);
+      if (force && !_isNetwork(e)) toast(msg, true);
     } finally {
       _newsBusy = false;
       newsScanInProgress = false;
@@ -2267,8 +2267,14 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
     return switch (action) {
       CopilotStageTrade s => await _copilotStage(s),
       CopilotSetMode m => await _copilotSetMode(m),
-      CopilotClosePosition c => await closePosition(c.symbol),
-      CopilotCancelOrder co => await cancelOrdersForSymbol(co.symbol),
+      CopilotClosePosition _ => (
+          ok: false,
+          message: '🛡️ Copilot safety lock: Close position manually in the Portfolio tab.'
+        ),
+      CopilotCancelOrder _ => (
+          ok: false,
+          message: '🛡️ Copilot safety lock: Cancel orders manually in the Portfolio tab.'
+        ),
       CopilotUnsupported u => (ok: false, message: 'Ignored unsupported copilot action: ${u.type}.'),
     };
   }
