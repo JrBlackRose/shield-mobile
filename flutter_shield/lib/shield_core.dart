@@ -1,6 +1,8 @@
 // ============================================================================
-// PROJECT SHIELD v4.0 — lib/shield_core.dart
+// PROJECT SHIELD v4.3 — lib/shield_core.dart
 // Exact integer-pips risk math, shared models, Alpaca/Gemini clients & WatchLink
+// v4.3: bare-crypto tickers, fractional crypto sizing, 24/7 scan universe,
+//       Copilot confirmation model, user-friendly audit-feed helpers
 // ============================================================================
 
 import 'dart:convert';
@@ -129,7 +131,14 @@ int positionSize({required Pips equity, required Pips entry, required Pips stop}
 class BracketPlan {
   final Timeframe timeframe;
   final Pips equity, entry, limitCollar, stopLoss, takeProfit;
+
+  /// Whole-share quantity (equities). For fractional plans this is
+  /// `math.max(1, qty.round())`, kept only for UI compatibility.
   final int shares;
+
+  /// Exact order quantity. Equals `shares.toDouble()` for equity plans.
+  final double qty;
+
   const BracketPlan({
     required this.timeframe,
     required this.equity,
@@ -138,12 +147,18 @@ class BracketPlan {
     required this.stopLoss,
     required this.takeProfit,
     required this.shares,
-  });
+    double? qty,
+  }) : qty = qty ?? (shares * 1.0);
+
+  int get _qtyUnits => (qty * kQtyScale).round();
+  Pips _scaled(Pips perUnit) => (_qtyUnits * perUnit + kQtyScale ~/ 2) ~/ kQtyScale;
+
+  String get qtyText => formatQty(qty);
 
   Pips get riskPerShare => entry - stopLoss;
-  Pips get capitalRequired => shares * entry;
-  Pips get maxRisk => shares * riskPerShare;
-  Pips get maxRiskAtCollar => shares * (limitCollar - stopLoss);
+  Pips get capitalRequired => _scaled(entry);
+  Pips get maxRisk => _scaled(riskPerShare);
+  Pips get maxRiskAtCollar => _scaled(limitCollar - stopLoss);
   double get rewardRisk => (takeProfit - entry) / riskPerShare;
 }
 
@@ -151,6 +166,7 @@ BracketPlan buildBracketPlan({
   required Pips equity,
   required Pips ask,
   required Timeframe timeframe,
+  bool fractional = false,
 }) {
   if (equity <= 0 || ask <= 0) throw const PlanAbort('Equity and entry price must be positive.');
   final intraday = timeframe == Timeframe.intraday;
@@ -159,6 +175,28 @@ BracketPlan buildBracketPlan({
 
   final stop = _roundToTickRatio(ask * (kBpsDenom - stopBps), kBpsDenom);
   final target = _roundToTickRatio(ask * (kBpsDenom + targetBps), kBpsDenom);
+
+  if (fractional) {
+    final riskPerUnit = ask - stop;
+    if (riskPerUnit <= 0) throw const PlanAbort('Invalid stop loss price.');
+    // Quantity in 0.0001 units. Because kQtyScale == kBpsDenom the scale
+    // factors cancel: qty * 10^4 = equity * bps / (10^4 * price) * 10^4.
+    final riskUnits = (equity * RiskRules.riskBudgetBps) ~/ riskPerUnit;
+    final capUnits = (equity * RiskRules.notionalCapBps) ~/ ask;
+    final units = math.max(1, math.min(riskUnits, capUnits)); // floor + 0.0001 minimum
+    final qty = units / kQtyScale;
+    return BracketPlan(
+      timeframe: timeframe,
+      equity: equity,
+      entry: ask,
+      limitCollar: limitCollarPrice(ask),
+      stopLoss: stop,
+      takeProfit: target,
+      shares: math.max(1, qty.round()),
+      qty: qty,
+    );
+  }
+
   final shares = positionSize(equity: equity, entry: ask, stop: stop);
 
   return BracketPlan(
@@ -214,16 +252,64 @@ bool spreadAllowed(double spreadBps, Timeframe tf) => spreadBps <= maxSpreadBps(
 
 const int kPollSec = 5;
 const Duration kCardTtl = Duration(minutes: 5);
-const String kGeminiModel = 'gemini-3.5-flash-lite';
+const String kGeminiModel = 'gemini-2.5-flash';
 const List<String> kGeminiFallbackModels = [
-  'gemini-3.5-flash-lite',
   'gemini-2.5-flash',
+  'gemini-2.5-flash-lite',
   'gemini-2.0-flash',
 ];
 const int kFeedMax = 15;
 const String kPaperBase = 'https://paper-api.alpaca.markets/v2';
 const String kDataBase = 'https://data.alpaca.markets/v2';
 final RegExp kTickerPattern = RegExp(r'^[A-Z][A-Z0-9.\-]{0,9}$');
+
+// ---------------------------------------------------------------------------
+// Crypto symbol helpers (v4.3)
+// ---------------------------------------------------------------------------
+
+/// Bare crypto tickers a user may type without a quote currency ("BTC").
+const Set<String> kKnownCryptoBases = {
+  'BTC', 'ETH', 'SOL', 'AVAX', 'LINK', 'LTC', 'UNI', 'AAVE', 'DOGE', 'XRP',
+  'ADA', 'DOT', 'BCH', 'SHIB', 'PEPE', 'NEAR', 'SUI', 'APT', 'ARB', 'OP',
+};
+
+/// Normalises user input: strips whitespace and slashes, upper-cases, and
+/// expands a bare known crypto base ("btc", "ETH") to its USD pair ("BTCUSD").
+String normSym(String raw) {
+  final sym = raw.replaceAll(RegExp(r'[\s/]+'), '').toUpperCase();
+  return kKnownCryptoBases.contains(sym) ? '${sym}USD' : sym;
+}
+
+/// True for "BTC", "BTCUSD" and "BTC/USD" (and any explicit "XXX/USD" pair).
+bool isCryptoSymbol(String raw) {
+  final sym = normSym(raw);
+  if (sym.length <= 3 || !sym.endsWith('USD')) return false;
+  final base = sym.substring(0, sym.length - 3);
+  if (kKnownCryptoBases.contains(base)) return true;
+  return raw.contains('/');
+}
+
+/// Alpaca crypto pair notation: cryptoPair('BTC') == 'BTC/USD'.
+String cryptoPair(String raw) {
+  final sym = normSym(raw);
+  if (sym.length > 3 && sym.endsWith('USD')) {
+    return '${sym.substring(0, sym.length - 3)}/USD';
+  }
+  return '$sym/USD';
+}
+
+// ---------------------------------------------------------------------------
+// Fractional quantity helpers (v4.3)
+// ---------------------------------------------------------------------------
+
+/// Fractional quantities are tracked to 4 decimal places (1 unit = 0.0001).
+const int kQtyScale = 10000;
+const double kMinFractionalQty = 0.0001;
+
+/// "2" for whole quantities, otherwise up to 4 decimals with zeros trimmed.
+String formatQty(double qty) => qty == qty.roundToDouble()
+    ? '${qty.round()}'
+    : qty.toStringAsFixed(4).replaceAll(RegExp(r'0+$'), '').replaceAll(RegExp(r'\.$'), '');
 
 String usd(Pips p, {bool sign = false}) {
   final neg = p < 0;
@@ -265,6 +351,97 @@ String? intradayWindowMessage(DateTime utc) {
     return 'Outside Intraday Window (NY Time ${two(ny.hour)}:${two(ny.minute)} not in 09:35-15:50)';
   }
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// Global phases & scan universes (v4.3)
+// ---------------------------------------------------------------------------
+
+enum GlobalPhase { weekend, overnight, preMarket, regular, afterHours }
+
+/// Major 24/7 crypto pairs: always tradable, so the scanner always has candidates.
+const List<String> kCryptoScanPairs = [
+  'BTCUSD', 'ETHUSD', 'SOLUSD', 'AVAXUSD', 'LINKUSD',
+  'DOGEUSD', 'XRPUSD', 'LTCUSD', 'UNIUSD', 'AAVEUSD',
+];
+
+/// Top liquid US tickers (large caps + index ETFs).
+const List<String> kLiquidUsEquities = [
+  'SPY', 'QQQ', 'IWM', 'AAPL', 'MSFT', 'NVDA', 'AMZN', 'GOOGL', 'META', 'TSLA',
+  'AVGO', 'AMD', 'NFLX', 'JPM', 'V', 'MA', 'COST', 'WMT', 'LLY', 'UNH',
+  'XOM', 'ORCL', 'CRM', 'ADBE', 'INTC', 'MU', 'QCOM', 'PLTR', 'COIN', 'UBER',
+  'SHOP', 'BA', 'DIS', 'PYPL', 'BAC', 'CSCO', 'PEP', 'KO', 'HD', 'ABBV',
+  'MRK', 'TSM', 'ARM', 'SMCI', 'NOW', 'PANW', 'CRWD', 'SNOW', 'SOFI', 'HOOD',
+];
+
+/// Names that habitually move on news/earnings outside regular hours.
+const List<String> kExtendedHoursMovers = [
+  'MU', 'SMCI', 'PLTR', 'COIN', 'MSTR', 'HOOD', 'RIVN', 'NIO', 'SOFI', 'AFRM',
+  'RDDT', 'ARM', 'SOUN', 'IONQ', 'RKLB', 'HIMS', 'APP', 'CELH',
+];
+
+/// Classifies [utc] into a US-centred trading phase (NY time, DST aware).
+GlobalPhase globalPhaseAt(DateTime utc) {
+  final ny = nyTime(utc);
+  final mins = ny.hour * 60 + ny.minute;
+  switch (ny.weekday) {
+    case DateTime.saturday:
+      return GlobalPhase.weekend;
+    case DateTime.sunday:
+      return mins >= 20 * 60 ? GlobalPhase.overnight : GlobalPhase.weekend;
+    case DateTime.friday:
+      if (mins >= 20 * 60) return GlobalPhase.weekend;
+      break;
+  }
+  if (mins >= 20 * 60 || mins < 4 * 60) return GlobalPhase.overnight;
+  if (mins < 9 * 60 + 30) return GlobalPhase.preMarket;
+  if (mins < 16 * 60) return GlobalPhase.regular;
+  return GlobalPhase.afterHours;
+}
+
+String phaseLabel(GlobalPhase p) {
+  switch (p) {
+    case GlobalPhase.weekend:
+      return 'Weekend · Crypto Only';
+    case GlobalPhase.overnight:
+      return 'Overnight · Crypto Focus';
+    case GlobalPhase.preMarket:
+      return 'Pre-Market';
+    case GlobalPhase.regular:
+      return 'Regular Session';
+    case GlobalPhase.afterHours:
+      return 'After-Hours';
+  }
+}
+
+/// Compact per-phase watchlist (what the UI chips show).
+List<String> phaseWatchlist(GlobalPhase p) {
+  switch (p) {
+    case GlobalPhase.weekend:
+    case GlobalPhase.overnight:
+      return List<String>.of(kCryptoScanPairs);
+    case GlobalPhase.preMarket:
+    case GlobalPhase.afterHours:
+      return <String>{'SPY', 'QQQ', ...kExtendedHoursMovers, 'BTCUSD', 'ETHUSD'}.toList();
+    case GlobalPhase.regular:
+      return kLiquidUsEquities.take(20).toList();
+  }
+}
+
+/// Broad scan universe. US stocks (liquid names + extended-hours movers) are
+/// included when the regular clock is open or extended hours are active;
+/// the 24/7 crypto pairs are ALWAYS included.
+List<String> dynamicScanUniverse(DateTime utc, {required bool clockOpen}) {
+  final phase = globalPhaseAt(utc);
+  final extended = phase == GlobalPhase.preMarket || phase == GlobalPhase.afterHours;
+  final out = <String>{};
+  if (clockOpen || extended) {
+    if (extended && !clockOpen) out.addAll(kExtendedHoursMovers);
+    out.addAll(kLiquidUsEquities);
+    out.addAll(kExtendedHoursMovers);
+  }
+  out.addAll(kCryptoScanPairs);
+  return out.toList();
 }
 
 class Vault {
@@ -318,9 +495,15 @@ class Position {
     required this.marketValue,
     required this.unrealizedPl,
     required this.unrealizedPlpc,
+    this.exactQty,
   });
   final String symbol;
   final int qty;
+
+  /// Exact (possibly fractional) quantity, e.g. 0.0123 BTC. `qty` rounds to 0.
+  final double? exactQty;
+  double get qtyDouble => exactQty ?? qty.toDouble();
+  String get qtyText => formatQty(qtyDouble);
   final bool isLong;
   final Pips avgEntry, currentPrice, marketValue, unrealizedPl;
   final double unrealizedPlpc;
@@ -328,6 +511,7 @@ class Position {
   factory Position.fromJson(Map<String, dynamic> j) => Position(
         symbol: (j['symbol'] ?? '?').toString(),
         qty: (double.tryParse('${j['qty']}') ?? 0).abs().round(),
+        exactQty: (double.tryParse('${j['qty']}') ?? 0).abs(),
         isLong: j['side'] != 'short',
         avgEntry: tryPips(j['avg_entry_price']) ?? 0,
         currentPrice: tryPips(j['current_price']) ?? 0,
@@ -383,6 +567,137 @@ class FeedEvent {
   factory FeedEvent.fromJson(Map<String, dynamic> j) =>
       FeedEvent(DateTime.parse(j['t'] as String), j['m'] as String, (j['l'] ?? 'info') as String);
   String get text => '[${hms(mytTime(time))}]$message';
+
+  // ---- user-friendly audit helpers (v4.3) ---------------------------------
+
+  static final RegExp _aiWord = RegExp(r'\bAI\b');
+  static final RegExp _uuidRe =
+      RegExp(r'\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b');
+  static final RegExp _emojiRe =
+      RegExp(r'[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}]', unicode: true);
+  static const Set<String> _notSymbols = {
+    'AI', 'AUTO', 'RISK', 'KILL', 'DEFENSE', 'GUARDIAN', 'ORDER', 'ORDERS', 'API', 'USD',
+    'MYT', 'NY', 'OK', 'ID', 'PAPER', 'GEMINI', 'ALPACA', 'SWING', 'INTRADAY', 'STOP',
+    'LIMIT', 'MKT', 'TP', 'SL', 'BUY', 'SELL', 'GTC', 'DAY', 'IEX', 'HTTP', 'JSON', 'UTC',
+    'EST', 'EDT', 'PNL', 'NEWS', 'ALERT', 'SCOUT', 'COPILOT', 'SYSTEM', 'ERROR', 'FAILED',
+    'WARN', 'MODE', 'MANUAL', 'CARD', 'THE', 'AND', 'FOR', 'NOT', 'OFF', 'ALL', 'NEW',
+    'CASH', 'TTL', 'BPS', 'RSI', 'VWAP', 'OF', 'TO', 'IN', 'AT', 'IS', 'BY', 'OR', 'IF',
+    'NO', 'UP', 'DO', 'AS', 'AN', 'BE', 'US', 'WE', 'IT', 'SO', 'ET',
+  };
+
+  bool _has(List<String> needles) => needles.any((n) => message.contains(n));
+
+  /// 'trade' | 'risk' | 'guard' | 'ai' | 'system'
+  String get category {
+    if (_has(const ['Approved', 'AUTO', 'Staged', 'Order'])) return 'trade';
+    if (_has(const ['RISK', 'DEFENSE', 'KILL', '⛔', '🚨', '❌'])) return 'risk';
+    if (_has(const ['GUARDIAN', '🛡', 'collar'])) return 'guard';
+    if (_aiWord.hasMatch(message) || _has(const ['Scout', 'Copilot', '🤖', '🧭', '🧠'])) return 'ai';
+    return 'system';
+  }
+
+  /// First ticker-looking token in the message ("BTCUSD", "MU"), if any.
+  String? get _symbolHint {
+    for (final m in RegExp(r'\b([A-Z]{2,6})(/?)USD\b').allMatches(message)) {
+      final base = m.group(1)!;
+      if (kKnownCryptoBases.contains(base) || m.group(2) == '/') return '${base}USD';
+    }
+    for (final m in RegExp(r'\b[A-Z]{2,5}\b').allMatches(message)) {
+      final tok = m.group(0)!;
+      if (_notSymbols.contains(tok)) continue;
+      return normSym(tok);
+    }
+    return null;
+  }
+
+  /// Short, non-technical headline (3-6 words), e.g. "Order Approved · BTCUSD".
+  String get cleanTitle {
+    final low = message.toLowerCase();
+    final sym = _symbolHint;
+    String withSym(String h) => sym == null ? h : '$h · $sym';
+
+    switch (category) {
+      case 'trade':
+        if (low.contains('reject')) return withSym('Order Rejected');
+        if (low.contains('fail')) return withSym('Order Failed');
+        if (low.contains('cancel')) return withSym('Order Cancelled');
+        if (low.contains('approved')) return withSym('Order Approved');
+        if (low.contains('staged')) return withSym('Trade Staged');
+        if (message.contains('AUTO')) return withSym('Auto Trade Placed');
+        if (low.contains('executed') || low.contains('filled')) return withSym('Order Executed');
+        return withSym('Order Update');
+      case 'risk':
+        if (message.contains('KILL')) return 'Kill Switch Triggered';
+        if (message.contains('DEFENSE')) return withSym('Defense Alert');
+        return withSym('Risk Alert');
+      case 'guard':
+        if (low.contains('arm')) return withSym('Guardian Protection Armed');
+        if (low.contains('collar')) return withSym('Price Collar Applied');
+        return withSym('Guardian Update');
+      case 'ai':
+        if (message.contains('Scout')) return withSym('AI Scout Update');
+        if (message.contains('Copilot')) return withSym('Copilot Update');
+        return withSym('AI Insight');
+      default:
+        if (low.contains('disconnect') || low.contains('offline')) return 'Connection Lost';
+        if (low.contains('connected')) {
+          if (low.contains('gemini')) return 'Connected to Gemini';
+          return 'Connected to Alpaca Paper';
+        }
+        if (low.contains('mode')) return 'Trading Mode Changed';
+        if (low.contains('error') || low.contains('fail')) return 'Something Went Wrong';
+        return 'System Notice';
+    }
+  }
+
+  static String _friendlyHttp(String code) {
+    if (code == '401' || code == '403') return 'your keys were rejected';
+    if (code == '429') return 'the service is rate limiting requests';
+    if (code.startsWith('5')) return 'the service had a temporary problem';
+    return 'the request was not accepted';
+  }
+
+  /// Raw codes, timestamps and order IDs removed; reads as a plain sentence.
+  String get cleanSubtitle {
+    var s = message;
+    s = s.replaceAll(_uuidRe, '');
+    s = s.replaceAll(RegExp(r'\bshield-[A-Za-z0-9_\-]+'), '');
+    s = s.replaceAll(RegExp(r'\b\d{4}-\d{2}-\d{2}T[\d:.]+Z?'), '');
+    s = s.replaceAll(RegExp(r'\[\d{1,2}:\d{2}(?::\d{2})?\]'), '');
+    s = s.replaceAll(
+      RegExp(r'\b(?:order\s*id|client[_\s]*order[_\s]*id|oid|token|id)\s*[:=#]\s*\S+', caseSensitive: false),
+      '',
+    );
+    s = s.replaceAllMapped(RegExp(r'\bHTTP\s*(\d{3})\b'), (m) => _friendlyHttp(m.group(1)!));
+    s = s.replaceAll(_emojiRe, '');
+    s = s.replaceFirst(RegExp(r'^[^A-Za-z0-9$]+'), '');
+    s = s.replaceFirst(
+      RegExp(r'^\[?(?:RISK|DEFENSE|KILL|GUARDIAN|AUTO|AI|SCOUT|COPILOT|SYSTEM|ERROR|WARN)\]?\s*[:\-–—]\s*'),
+      '',
+    );
+    s = s.replaceAll(RegExp(r'\(\s*\)'), '');
+    s = s.replaceAll(RegExp(r'\s+'), ' ');
+    s = s.replaceAllMapped(RegExp(r'\s+([,.;:!?])'), (m) => m.group(1)!);
+    s = s.replaceAll(RegExp(r'^[\s,;:·|\-–—]+|[\s,;:·|\-–—]+$'), '');
+
+    if (s.isEmpty) {
+      switch (category) {
+        case 'trade':
+          return 'An order event was recorded.';
+        case 'risk':
+          return 'A risk control was triggered.';
+        case 'guard':
+          return 'Guardian protection is active.';
+        case 'ai':
+          return 'The AI assistant posted an update.';
+        default:
+          return 'System status updated.';
+      }
+    }
+    s = s[0].toUpperCase() + s.substring(1);
+    if (!RegExp(r'[.!?…]$').hasMatch(s)) s = '$s.';
+    return s;
+  }
 }
 
 class ConfluenceSignal {
@@ -471,6 +786,7 @@ class PendingCard {
     required this.createdAt,
     required this.expiresAt,
     required this.offHours,
+    this.qty,
     this.confluence,
     this.status = CardStatus.pending,
     this.driftAtApproval,
@@ -480,6 +796,9 @@ class PendingCard {
   final String token, ticker, source;
   final Timeframe timeframe;
   final int shares;
+
+  /// Exact (possibly fractional) quantity; null means `shares.toDouble()`.
+  final double? qty;
   final Pips entry, limitCollar, stopLoss, takeProfit, maxRisk;
   final double microPrice, imbalance, spreadBps;
   final DateTime createdAt, expiresAt;
@@ -491,11 +810,14 @@ class PendingCard {
 
   String get clientOrderId => 'shield-$token';
 
+  String get qtyText => formatQty(qty ?? shares.toDouble());
+
   Map<String, dynamic> toJson() => {
         'token': token,
         'ticker': ticker,
         'tf': timeframe.name,
         'shares': shares,
+        'qty': qty ?? shares.toDouble(),
         'entry': entry,
         'collar': limitCollar,
         'stop': stopLoss,
@@ -520,6 +842,7 @@ class PendingCard {
         ticker: j['ticker'] as String,
         timeframe: Timeframe.values.byName(j['tf'] as String),
         shares: j['shares'] as int,
+        qty: (j['qty'] as num?)?.toDouble() ?? (j['shares'] as int).toDouble(),
         entry: j['entry'] as int,
         limitCollar: j['collar'] as int,
         stopLoss: j['stop'] as int,
@@ -538,6 +861,29 @@ class PendingCard {
         orderId: j['orderId'] as String?,
         errorMessage: j['err'] as String?,
       );
+}
+
+enum CopilotActionKind { stageTrade, cancelOrder, closePosition, setMode }
+
+/// An action proposed by the Copilot that needs explicit user confirmation
+/// before the controller executes anything.
+class PendingCopilotAction {
+  const PendingCopilotAction({
+    required this.id,
+    required this.kind,
+    required this.title,
+    required this.summary,
+    required this.createdAt,
+    this.symbol,
+    this.timeframe,
+    this.targetMode,
+  });
+  final String id, title, summary;
+  final CopilotActionKind kind;
+  final DateTime createdAt;
+  final String? symbol;
+  final Timeframe? timeframe;
+  final ExecMode? targetMode;
 }
 
 class AiDecision {
@@ -616,7 +962,7 @@ class Failed extends TradeResult {
 }
 
 String planSummary(BracketPlan p) =>
-    '${p.shares} sh | Collar ≤ ${priceStr(p.limitCollar)} | Stop${priceStr(p.stopLoss)} | '
+    '${p.qtyText} sh | Collar ≤ ${priceStr(p.limitCollar)} | Stop${priceStr(p.stopLoss)} | '
     'Target ${priceStr(p.takeProfit)} | Max risk${usd(p.maxRisk)}';
 
 const Duration _kReadTimeout = Duration(seconds: 20);
@@ -660,7 +1006,7 @@ class AlpacaClient {
   Future<List<Map<String, dynamic>>> getPositions() async => _list(await _get('$kPaperBase/positions'));
 
   Future<List<Map<String, dynamic>>> getOpenOrders() async =>
-      _list(await _get('$kPaperBase/orders?status=open&limit=10&direction=desc&nested=true'));
+      _list(await _get('$kPaperBase/orders?status=open&limit=100&direction=desc&nested=true'));
 
   Future<Map<String, dynamic>> getClock() async =>
       ((await _get('$kPaperBase/clock')) as Map).cast<String, dynamic>();
@@ -677,6 +1023,35 @@ class AlpacaClient {
     throw PlanAbort('No snapshot returned for $symbol.');
   }
 
+  /// Crypto orders cannot use `day`; they must be `gtc` (or `ioc`).
+  String _tif(String symbol, Timeframe timeframe) =>
+      (isCryptoSymbol(symbol) || timeframe != Timeframe.intraday) ? 'gtc' : 'day';
+
+  /// Plain collared limit-buy entry (no bracket legs). Used for crypto, where
+  /// Alpaca does not accept bracket orders.
+  Future<Map<String, dynamic>> submitEntryLimit({
+    required String symbol,
+    required int shares,
+    required Timeframe timeframe,
+    required Pips limitCollar,
+    required String clientOrderId,
+    String? qtyText,
+  }) async {
+    final body = {
+      'symbol': symbol,
+      'qty': qtyText ?? '$shares',
+      'side': 'buy',
+      'type': 'limit',
+      'time_in_force': _tif(symbol, timeframe),
+      'limit_price': toApiPrice(limitCollar),
+      'client_order_id': clientOrderId,
+    };
+    final res = await _http
+        .post(Uri.parse('$kPaperBase/orders'), headers: _jh, body: jsonEncode(body))
+        .timeout(_kReadTimeout);
+    return (_decode(res) as Map).cast<String, dynamic>();
+  }
+
   Future<Map<String, dynamic>> submitBracket({
     required String symbol,
     required int shares,
@@ -685,13 +1060,24 @@ class AlpacaClient {
     required Pips takeProfit,
     required Pips stopLoss,
     required String clientOrderId,
+    String? qtyText,
   }) async {
+    if (isCryptoSymbol(symbol)) {
+      return submitEntryLimit(
+        symbol: cryptoPair(symbol),
+        shares: shares,
+        timeframe: timeframe,
+        limitCollar: limitCollar,
+        clientOrderId: clientOrderId,
+        qtyText: qtyText,
+      );
+    }
     final body = {
       'symbol': symbol,
-      'qty': shares.toString(),
+      'qty': qtyText ?? '$shares',
       'side': 'buy',
       'type': 'limit',
-      'time_in_force': timeframe == Timeframe.intraday ? 'day' : 'gtc',
+      'time_in_force': _tif(symbol, timeframe),
       'limit_price': toApiPrice(limitCollar),
       'order_class': 'bracket',
       'take_profit': {'limit_price': toApiPrice(takeProfit)},
@@ -751,28 +1137,40 @@ class GeminiClient {
   Future<String> chatCopilot(String prompt) => _callGemini(prompt);
 
   Future<String> _callGemini(String promptText) async {
-    final res = await _http
-        .post(
-          Uri.parse('https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent'),
-          headers: {'x-goog-api-key': _key, 'Content-Type': 'application/json'},
-          body: jsonEncode({
-            'contents': [
-              {
-                'parts': [
-                  {'text': promptText}
-                ]
-              }
-            ],
-            'generationConfig': {'responseMimeType': 'application/json'},
-          }),
-        )
-        .timeout(_kReadTimeout);
-    if (res.statusCode != 200) {
-      var msg = 'HTTP ${res.statusCode}';
+    http.Response? res;
+    for (var i = 0; i < kGeminiFallbackModels.length; i++) {
+      final m = kGeminiFallbackModels[i];
+      res = await _http
+          .post(
+            Uri.parse('https://generativelanguage.googleapis.com/v1beta/models/$m:generateContent'),
+            headers: {'x-goog-api-key': _key, 'Content-Type': 'application/json'},
+            body: jsonEncode({
+              'contents': [
+                {
+                  'parts': [
+                    {'text': promptText}
+                  ]
+                }
+              ],
+              'generationConfig': {'responseMimeType': 'application/json'},
+            }),
+          )
+          .timeout(_kReadTimeout);
+      if (res.statusCode == 200) break;
+      if ((res.statusCode == 503 || res.statusCode == 429 || res.statusCode == 500 || res.statusCode == 404) &&
+          i < kGeminiFallbackModels.length - 1) {
+        await Future<void>.delayed(Duration(milliseconds: 800 * (i + 1)));
+        continue;
+      }
+      break;
+    }
+    if (res == null || res.statusCode != 200) {
+      final code = res?.statusCode ?? 503;
+      var msg = 'HTTP $code';
       try {
-        msg = (jsonDecode(res.body)['error']['message'] ?? msg).toString();
+        if (res != null) msg = (jsonDecode(res.body)['error']['message'] ?? msg).toString();
       } catch (_) {}
-      throw ApiException('Gemini', res.statusCode, msg);
+      throw ApiException('Gemini', code, msg);
     }
     try {
       final outer = jsonDecode(res.body) as Map<String, dynamic>;

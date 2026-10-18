@@ -1,5 +1,5 @@
 // ============================================================================
-// PROJECT SHIELD v4.2 — lib/main.dart  (UI shell only)
+// PROJECT SHIELD v4.3 — lib/main.dart  (UI shell only)
 //
 // Imports the pure core and the controller:
 //   shield_core.dart        risk math, formatting, models, watch-link types
@@ -45,6 +45,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'shield_chart.dart';
 import 'shield_controller.dart';
 import 'shield_core.dart';
 
@@ -84,6 +85,55 @@ String _ago(DateTime t) {
   if (d.inMinutes < 60) return '${d.inMinutes}m ago';
   if (d.inHours < 24) return '${d.inHours}h ago';
   return '${d.inDays}d ago';
+}
+
+/// "Just now" / "3m ago" / "1h ago" / "2d ago" — measured against a ticking clock.
+String _rel(DateTime t, DateTime now) {
+  final d = now.toUtc().difference(t.toUtc());
+  if (d.inSeconds < 60) return 'Just now';
+  if (d.inMinutes < 60) return '${d.inMinutes}m ago';
+  if (d.inHours < 24) return '${d.inHours}h ago';
+  return '${d.inDays}d ago';
+}
+
+// ---- ADAPTERS: the only places that touch model fields v4.3 had to assume. ----
+// If your FeedEvent / OrderSummary use different field names, change them here.
+DateTime _evTime(FeedEvent e) => e.time;
+String _orderSym(OrderSummary o) => o.symbol.toUpperCase();
+String _orderId(OrderSummary o) => o.id;
+String _legId(dynamic leg) => leg.id as String;
+
+({String label, Color color, IconData icon}) _catStyle(String category) => switch (category) {
+      'trade' => (label: 'TRADE', color: Pal.emerald, icon: Icons.swap_vert_rounded),
+      'risk' => (label: 'RISK', color: Pal.amber, icon: Icons.speed_rounded),
+      'guard' => (label: 'GUARDIAN', color: Pal.dangerSoft, icon: Icons.shield_outlined),
+      'ai' => (label: 'AI SCOUT', color: Color(0xFFA78BFA), icon: Icons.auto_awesome),
+      _ => (label: 'SYSTEM', color: Pal.muted, icon: Icons.settings_outlined),
+    };
+
+/// Confirmation dialog for cancelling. Returns true only on [Confirm Cancel].
+Future<bool> _confirmCancelDialog(BuildContext context, {required String symbol, int count = 1}) async {
+  final bulk = count > 1;
+  final ok = await showDialog<bool>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: Text(bulk ? 'Cancel all $count open orders for $symbol?' : 'Cancel open order for $symbol?'),
+      content: Text(
+        bulk
+            ? 'Every open order on $symbol (including bracket legs) will be cancelled. Open positions are NOT closed.'
+            : 'This cancels the order at Alpaca. Any open position in $symbol is NOT closed.',
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Keep Order')),
+        FilledButton(
+          style: FilledButton.styleFrom(backgroundColor: Pal.danger, foregroundColor: Colors.white),
+          onPressed: () => Navigator.pop(ctx, true),
+          child: const Text('Confirm Cancel'),
+        ),
+      ],
+    ),
+  );
+  return ok == true;
 }
 
 Color _levelColor(String level) => switch (level) {
@@ -216,6 +266,40 @@ class _ShieldHomeState extends State<ShieldHome> {
   void _openWatch() => Navigator.of(context)
       .push(MaterialPageRoute<void>(builder: (_) => WatchPreviewScreen(link: c.watchLink)));
 
+  /// Portfolio "Chart" buttons land here: load the symbol, show the chart in a sheet.
+  void _openChart(String symbol) {
+    unawaited(c.loadChart(symbol));
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      showDragHandle: true,
+      backgroundColor: Pal.bg,
+      constraints: const BoxConstraints(maxWidth: 720),
+      builder: (ctx) => FractionallySizedBox(
+        heightFactor: .94,
+        child: Padding(
+          padding: EdgeInsets.only(bottom: MediaQuery.of(ctx).viewInsets.bottom),
+          child: Column(children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 6, 0),
+              child: Row(children: [
+                const Expanded(child: Text('Chart', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 16))),
+                IconButton(icon: const Icon(Icons.close, color: Pal.muted), onPressed: () => Navigator.pop(ctx)),
+              ]),
+            ),
+            Expanded(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+                child: ShieldChartCard(controller: c),
+              ),
+            ),
+          ]),
+        ),
+      ),
+    );
+  }
+
   void _showUpdate() {
     final v = c.updateVersion;
     showDialog<void>(
@@ -256,7 +340,7 @@ class _ShieldHomeState extends State<ShieldHome> {
     return Scaffold(
       appBar: AppBar(
         titleSpacing: 12,
-        title: const Text('🛡️ SHIELD v4.2', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 17)),
+        title: const Text('🛡️ SHIELD v4.3', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 17)),
         actions: [
           if (c.updateAvailable)
             IconButton(
@@ -295,7 +379,7 @@ class _ShieldHomeState extends State<ShieldHome> {
             CopilotTab(c: c),
             NewsTab(c: c),
             TradeTab(c: c),
-            PortfolioTab(c: c),
+            PortfolioTab(c: c, onChart: _openChart),
           ]),
         ),
       ]),
@@ -933,6 +1017,7 @@ class _CopilotTabState extends State<CopilotTab> {
   final FocusNode _focus = FocusNode();
   int _seenCount = 0;
   bool _seenBusy = false;
+  bool _seenPending = false;
 
   /// sendNow = read-only questions fire immediately; order-related prompts only
   /// fill the box so you can review / edit the ticker before sending.
@@ -980,9 +1065,12 @@ class _CopilotTabState extends State<CopilotTab> {
   Widget build(BuildContext context) {
     final c = widget.c;
     final msgs = c.chat;
-    if (msgs.length != _seenCount || c.chatBusy != _seenBusy) {
+    final pendingAction = c.pendingCopilotAction;
+    final hasPending = pendingAction != null;
+    if (msgs.length != _seenCount || c.chatBusy != _seenBusy || hasPending != _seenPending) {
       _seenCount = msgs.length;
       _seenBusy = c.chatBusy;
+      _seenPending = hasPending;
       _scrollToEnd();
     }
     return Center(
@@ -1010,6 +1098,7 @@ class _CopilotTabState extends State<CopilotTab> {
                     itemBuilder: (_, i) => i < msgs.length ? _ChatBubble(m: msgs[i]) : const _TypingBubble(),
                   ),
           ),
+          if (pendingAction != null) _CopilotConfirmBanner(c: c, action: pendingAction),
           SizedBox(
             height: 46,
             child: ListView.separated(
@@ -1062,6 +1151,105 @@ class _CopilotTabState extends State<CopilotTab> {
           ),
         ]),
       ),
+    );
+  }
+}
+
+/// High-visibility human-in-the-loop gate: nothing the Copilot proposes runs
+/// until the user taps [Approve & Execute].
+class _CopilotConfirmBanner extends StatefulWidget {
+  const _CopilotConfirmBanner({required this.c, required this.action});
+  final ShieldController c;
+  final PendingCopilotAction action;
+  @override
+  State<_CopilotConfirmBanner> createState() => _CopilotConfirmBannerState();
+}
+
+class _CopilotConfirmBannerState extends State<_CopilotConfirmBanner> {
+  bool _busy = false;
+
+  Future<void> _approve() async {
+    if (_busy) return;
+    HapticFeedback.mediumImpact();
+    setState(() => _busy = true);
+    try {
+      await widget.c.confirmCopilotAction();
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  void _abort() {
+    if (_busy) return;
+    widget.c.dismissCopilotAction();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final a = widget.action;
+    final kind = '${a.kind}'.split('.').last;
+    final risky = RegExp(r'close|cancel|flatten|trim|sell|exit', caseSensitive: false).hasMatch(kind);
+    final tone = risky ? Pal.danger : Pal.amber;
+    final sym = a.symbol;
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.fromLTRB(12, 4, 12, 6),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: _a(tone, .14),
+        border: Border.all(color: tone, width: 2),
+        borderRadius: BorderRadius.circular(12),
+        boxShadow: [BoxShadow(color: _a(tone, .25), blurRadius: 14, spreadRadius: 1)],
+      ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Icon(Icons.gpp_maybe_outlined, color: tone == Pal.danger ? Pal.dangerSoft : tone, size: 20),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text('CONFIRM COPILOT ACTION',
+                style: TextStyle(fontWeight: FontWeight.w800, fontSize: 12, letterSpacing: .6, color: tone == Pal.danger ? Pal.dangerSoft : tone)),
+          ),
+          _Tag(kind.toUpperCase(), tone == Pal.danger ? Pal.dangerSoft : tone),
+          if (sym != null && '$sym'.isNotEmpty) ...[const SizedBox(width: 6), _Tag('$sym', Pal.sky)],
+        ]),
+        const SizedBox(height: 8),
+        Text(a.title, style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 15.5, color: Colors.white)),
+        const SizedBox(height: 4),
+        Text(a.summary, style: const TextStyle(fontSize: 13, height: 1.35, color: Pal.text)),
+        const SizedBox(height: 4),
+        const Text('Nothing is sent to Alpaca until you approve.', style: TextStyle(fontSize: 11, color: Pal.muted)),
+        const SizedBox(height: 10),
+        Row(children: [
+          Expanded(
+            child: OutlinedButton(
+              style: OutlinedButton.styleFrom(
+                foregroundColor: Pal.dangerSoft,
+                side: const BorderSide(color: Pal.border),
+                padding: const EdgeInsets.symmetric(vertical: 12),
+              ),
+              onPressed: _busy ? null : _abort,
+              child: const Text('Abort', style: TextStyle(fontWeight: FontWeight.w700)),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            flex: 2,
+            child: FilledButton.icon(
+              style: FilledButton.styleFrom(
+                backgroundColor: Pal.emerald,
+                foregroundColor: Colors.black,
+                disabledBackgroundColor: _a(Pal.emerald, .5),
+                padding: const EdgeInsets.symmetric(vertical: 12),
+              ),
+              onPressed: _busy ? null : _approve,
+              icon: _busy
+                  ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.black))
+                  : const Icon(Icons.check_circle_outline, size: 18),
+              label: Text(_busy ? 'Executing…' : 'Approve & Execute', style: const TextStyle(fontWeight: FontWeight.w800)),
+            ),
+          ),
+        ]),
+      ]),
     );
   }
 }
@@ -1286,7 +1474,7 @@ class DefenseCard extends StatelessWidget {
           padding: const EdgeInsets.all(8),
           decoration: BoxDecoration(color: Pal.bg, borderRadius: BorderRadius.circular(6), border: Border.all(color: Pal.border)),
           child: Text(
-            '${p.isLong ? 'LONG' : 'SHORT'} ${p.qty} sh @ ${usd(p.avgEntry)} · P&L ${usd(p.unrealizedPl, sign: true)} · ${expo.toStringAsFixed(1)}% of equity',
+            '${p.isLong ? 'LONG' : 'SHORT'} ${p.qtyText} sh @ ${usd(p.avgEntry)} · P&L ${usd(p.unrealizedPl, sign: true)} · ${expo.toStringAsFixed(1)}% of equity',
             style: _mono.copyWith(fontSize: 12),
           ),
         ),
@@ -1369,6 +1557,7 @@ class TradeTab extends StatelessWidget {
   Widget build(BuildContext context) => _TabScroll(
         onRefresh: c.refresh,
         children: [
+          ShieldChartCard(controller: c),
           TradePanel(c: c),
           _Header('📱 Staged approval cards (${c.pendingCards.length})'),
           if (c.pendingCards.isEmpty)
@@ -1509,7 +1698,7 @@ class StagedApprovalCard extends StatelessWidget {
           Pill(tfLabel(card.timeframe), Pal.sky),
           if (card.offHours) ...[const SizedBox(width: 6), const Pill('OFF-HOURS', Pal.amber)],
           const Spacer(),
-          Text('${card.shares} sh', style: const TextStyle(color: Pal.emerald, fontWeight: FontWeight.w800, fontSize: 15)),
+          Text('${card.qtyText} sh', style: const TextStyle(color: Pal.emerald, fontWeight: FontWeight.w800, fontSize: 15)),
         ]),
         const SizedBox(height: 10),
 
@@ -1745,13 +1934,23 @@ class ConfluenceBlock extends StatelessWidget {
 // ============================================================================
 
 class PortfolioTab extends StatelessWidget {
-  const PortfolioTab({super.key, required this.c});
+  const PortfolioTab({super.key, required this.c, required this.onChart});
   final ShieldController c;
+  final void Function(String symbol) onChart;
 
   @override
   Widget build(BuildContext context) {
     final eq = c.account?.equity ?? 0;
     final cap = RiskRules.notionalCapBps / 100.0;
+
+    // Symbols with 2+ open orders get a one-tap "cancel all" shortcut.
+    final perSymbol = <String, int>{};
+    for (final o in c.orders) {
+      final s = _orderSym(o);
+      perSymbol[s] = (perSymbol[s] ?? 0) + 1;
+    }
+    final multi = perSymbol.entries.where((e) => e.value > 1).toList();
+
     return _TabScroll(
       onRefresh: c.refresh,
       children: [
@@ -1759,36 +1958,157 @@ class PortfolioTab extends StatelessWidget {
           title: '📂 Open positions (${c.positions.length})',
           child: c.positions.isEmpty
               ? const Text('Account is flat.', style: TextStyle(color: Pal.muted))
-              : Column(children: [for (final p in c.positions) _PositionRow(p: p, equity: eq, cap: cap)]),
+              : Column(children: [for (final p in c.positions) _PositionRow(p: p, equity: eq, cap: cap, onChart: onChart)]),
         ),
         Panel(
           title: '⏳ Open orders (${c.orders.length})',
           child: c.orders.isEmpty
               ? const Text('No open orders.', style: TextStyle(color: Pal.muted))
-              : Column(children: [for (final o in c.orders) _OrderRow(o: o)]),
+              : Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  if (multi.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 8),
+                      child: Wrap(spacing: 8, runSpacing: 6, children: [
+                        for (final m in multi)
+                          TextButton.icon(
+                            style: TextButton.styleFrom(
+                              foregroundColor: Pal.dangerSoft,
+                              visualDensity: VisualDensity.compact,
+                              side: BorderSide(color: _a(Pal.danger, .6)),
+                            ),
+                            icon: const Icon(Icons.layers_clear_outlined, size: 16),
+                            label: Text('Cancel all ${m.value} ${m.key} orders', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700)),
+                            onPressed: () async {
+                              final ok = await _confirmCancelDialog(context, symbol: m.key, count: m.value);
+                              if (!ok) return;
+                              final r = await c.cancelOrdersForSymbol(m.key);
+                              showToast(r.message, !r.ok);
+                            },
+                          ),
+                      ]),
+                    ),
+                  for (final o in c.orders) _OrderRow(key: ValueKey(_orderId(o)), c: c, o: o, onChart: onChart),
+                ]),
         ),
         Panel(
-          title: '⚡ Audit feed (last $kFeedMax events)',
-          child: c.feed.isEmpty
-              ? const Text('No events yet.', style: TextStyle(color: Pal.muted))
-              : Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  for (final e in c.feed)
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: 5),
-                      child: Text(e.text, style: _mono.copyWith(fontSize: 11.5, color: e.level == 'info' ? Pal.text : _levelColor(e.level))),
-                    ),
-                ]),
+          title: '🕘 Activity timeline',
+          trailing: Text('last $kFeedMax', style: const TextStyle(color: Pal.muted, fontSize: 11.5)),
+          child: ValueListenableBuilder<DateTime>(
+            valueListenable: c.now,
+            builder: (_, now, __) => _ActivityTimeline(events: c.feed, now: now),
+          ),
         ),
       ],
     );
   }
 }
 
+// ---------------------------------------------------------------------------
+// Activity timeline (replaces the raw "[HH:MM:SS] ..." log)
+// ---------------------------------------------------------------------------
+
+class _ActivityTimeline extends StatefulWidget {
+  const _ActivityTimeline({required this.events, required this.now});
+  final List<FeedEvent> events;
+  final DateTime now;
+  @override
+  State<_ActivityTimeline> createState() => _ActivityTimelineState();
+}
+
+class _ActivityTimelineState extends State<_ActivityTimeline> {
+  static const int _collapsed = 20;
+  bool _all = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final ev = widget.events;
+    if (ev.isEmpty) return const Text('No activity yet.', style: TextStyle(color: Pal.muted));
+    final shown = _all ? ev : ev.take(_collapsed).toList();
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      for (var i = 0; i < shown.length; i++)
+        _TimelineItem(e: shown[i], now: widget.now, last: i == shown.length - 1),
+      if (ev.length > _collapsed)
+        Align(
+          alignment: Alignment.centerLeft,
+          child: TextButton(
+            onPressed: () => setState(() => _all = !_all),
+            child: Text(_all ? 'Show less' : 'Show all ${ev.length} events'),
+          ),
+        ),
+    ]);
+  }
+}
+
+class _TimelineItem extends StatelessWidget {
+  const _TimelineItem({required this.e, required this.now, required this.last});
+  final FeedEvent e;
+  final DateTime now;
+  final bool last;
+
+  @override
+  Widget build(BuildContext context) {
+    final st = _catStyle(e.category);
+    final titleColor = switch (e.level) {
+      'error' => Pal.dangerSoft,
+      'warn' => Pal.amber,
+      _ => Pal.text,
+    };
+    final sub = e.cleanSubtitle;
+    return IntrinsicHeight(
+      child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        SizedBox(
+          width: 28,
+          child: Column(children: [
+            Container(
+              width: 22,
+              height: 22,
+              decoration: BoxDecoration(color: _a(st.color, .18), shape: BoxShape.circle, border: Border.all(color: st.color)),
+              child: Icon(st.icon, size: 12, color: st.color),
+            ),
+            if (!last) Expanded(child: Container(width: 2, margin: const EdgeInsets.symmetric(vertical: 2), color: Pal.border)),
+          ]),
+        ),
+        const SizedBox(width: 6),
+        Expanded(
+          child: Container(
+            margin: const EdgeInsets.only(bottom: 8),
+            padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
+            decoration: BoxDecoration(
+              color: Pal.bg,
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: Pal.border),
+            ),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Row(children: [
+                _Tag(st.label, st.color),
+                const Spacer(),
+                Text(_rel(_evTime(e), now), style: const TextStyle(color: Pal.muted, fontSize: 11)),
+              ]),
+              const SizedBox(height: 6),
+              Text(e.cleanTitle, style: TextStyle(color: titleColor, fontWeight: FontWeight.w700, fontSize: 13, height: 1.3)),
+              if (sub.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(top: 2),
+                  child: Text(sub, style: const TextStyle(color: Pal.muted, fontSize: 12, height: 1.3)),
+                ),
+            ]),
+          ),
+        ),
+      ]),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Position + Order rows
+// ---------------------------------------------------------------------------
+
 class _PositionRow extends StatelessWidget {
-  const _PositionRow({required this.p, required this.equity, required this.cap});
+  const _PositionRow({required this.p, required this.equity, required this.cap, required this.onChart});
   final Position p;
   final Pips equity;
   final double cap;
+  final void Function(String symbol) onChart;
 
   @override
   Widget build(BuildContext context) {
@@ -1801,7 +2121,7 @@ class _PositionRow extends StatelessWidget {
     final up = p.unrealizedPl >= 0;
     return Container(
       margin: const EdgeInsets.only(bottom: 8),
-      padding: const EdgeInsets.all(10),
+      padding: const EdgeInsets.fromLTRB(10, 10, 2, 10),
       decoration: BoxDecoration(color: Pal.bg, borderRadius: BorderRadius.circular(8), border: Border.all(color: Pal.border)),
       child: Row(children: [
         Expanded(
@@ -1812,7 +2132,7 @@ class _PositionRow extends StatelessWidget {
               Text(p.isLong ? 'LONG' : 'SHORT', style: const TextStyle(color: Pal.muted, fontSize: 10.5, fontWeight: FontWeight.w700)),
             ]),
             const SizedBox(height: 2),
-            Text('${p.qty} sh @ ${usd(p.avgEntry)} → ${usd(p.currentPrice)}', style: _mono.copyWith(fontSize: 11.5, color: Pal.muted)),
+            Text('${p.qtyText} sh @ ${usd(p.avgEntry)} → ${usd(p.currentPrice)}', style: _mono.copyWith(fontSize: 11.5, color: Pal.muted)),
           ]),
         ),
         Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
@@ -1820,38 +2140,118 @@ class _PositionRow extends StatelessWidget {
           const SizedBox(height: 4),
           Pill(pct > cap ? '⚠ ${pct.toStringAsFixed(1)}% eq' : '${pct.toStringAsFixed(1)}% eq', tone),
         ]),
+        IconButton(
+          tooltip: 'Chart ${p.symbol}',
+          visualDensity: VisualDensity.compact,
+          icon: const Icon(Icons.candlestick_chart_outlined, color: Pal.sky),
+          onPressed: () => onChart(p.symbol),
+        ),
       ]),
     );
   }
 }
 
-class _OrderRow extends StatelessWidget {
-  const _OrderRow({required this.o});
+class _OrderRow extends StatefulWidget {
+  const _OrderRow({super.key, required this.c, required this.o, required this.onChart});
+  final ShieldController c;
   final OrderSummary o;
+  final void Function(String symbol) onChart;
+  @override
+  State<_OrderRow> createState() => _OrderRowState();
+}
+
+class _OrderRowState extends State<_OrderRow> {
+  String? _busyId; // id currently being cancelled
+
+  Future<void> _cancel(String id) async {
+    if (_busyId != null) return;
+    final sym = _orderSym(widget.o);
+    final ok = await _confirmCancelDialog(context, symbol: sym);
+    if (!ok || !mounted) return;
+    setState(() => _busyId = id);
+    try {
+      final r = await widget.c.cancelOrderById(id, symbol: sym);
+      showToast(r.message, !r.ok);
+    } finally {
+      if (mounted) setState(() => _busyId = null);
+    }
+  }
+
+  Widget _cancelButton({required String id, bool compact = false}) {
+    final busy = _busyId == id;
+    return FilledButton.icon(
+      style: FilledButton.styleFrom(
+        backgroundColor: Pal.danger,
+        foregroundColor: Colors.white,
+        disabledBackgroundColor: _a(Pal.danger, .45),
+        disabledForegroundColor: Colors.white70,
+        padding: EdgeInsets.symmetric(horizontal: compact ? 10 : 14, vertical: compact ? 6 : 10),
+        minimumSize: Size(0, compact ? 32 : 40),
+        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      ),
+      onPressed: _busyId != null ? null : () => _cancel(id),
+      icon: busy
+          ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+          : const Icon(Icons.cancel_outlined, size: 16),
+      label: Text(busy ? 'Cancelling…' : 'Cancel Order', style: TextStyle(fontWeight: FontWeight.w800, fontSize: compact ? 12 : 13)),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    if (o.legs.isEmpty) {
-      return Align(
-        alignment: Alignment.centerLeft,
-        child: Padding(padding: const EdgeInsets.only(bottom: 8), child: Text('⏳ ${o.line}', style: _mono)),
-      );
-    }
-    return Theme(
-      data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
-      child: ExpansionTile(
-        tilePadding: EdgeInsets.zero,
-        childrenPadding: EdgeInsets.zero,
-        iconColor: Pal.muted,
-        collapsedIconColor: Pal.muted,
-        title: Text('⏳ ${o.line}', style: _mono),
-        children: [
-          for (final l in o.legs)
-            Padding(
-              padding: const EdgeInsets.only(left: 16, bottom: 4),
-              child: Align(alignment: Alignment.centerLeft, child: Text('↳ ${l.line}', style: _mono.copyWith(color: Pal.muted))),
-            ),
-        ],
+    final o = widget.o;
+    final sym = _orderSym(o);
+    final hasLegs = o.legs.isNotEmpty;
+
+    final actions = Row(children: [
+      OutlinedButton.icon(
+        style: OutlinedButton.styleFrom(
+          foregroundColor: Pal.sky,
+          side: BorderSide(color: _a(Pal.sky, .7)),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          minimumSize: const Size(0, 40),
+        ),
+        onPressed: () => widget.onChart(sym),
+        icon: const Icon(Icons.candlestick_chart_outlined, size: 16),
+        label: const Text('Chart', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13)),
       ),
+      const SizedBox(width: 8),
+      Expanded(child: _cancelButton(id: _orderId(o))),
+    ]);
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.fromLTRB(10, 8, 10, 10),
+      decoration: BoxDecoration(color: Pal.bg, borderRadius: BorderRadius.circular(8), border: Border.all(color: Pal.border)),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        if (!hasLegs)
+          Padding(padding: const EdgeInsets.symmetric(vertical: 4), child: Text('⏳ ${o.line}', style: _mono))
+        else
+          Theme(
+            data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+            child: ExpansionTile(
+              tilePadding: EdgeInsets.zero,
+              childrenPadding: EdgeInsets.zero,
+              iconColor: Pal.muted,
+              collapsedIconColor: Pal.muted,
+              title: Text('⏳ ${o.line}', style: _mono),
+              subtitle: Text('${o.legs.length} bracket legs — tap to expand', style: const TextStyle(color: Pal.muted, fontSize: 11)),
+              children: [
+                for (final l in o.legs)
+                  Padding(
+                    padding: const EdgeInsets.only(left: 12, bottom: 6),
+                    child: Row(children: [
+                      Expanded(child: Text('↳ ${l.line}', style: _mono.copyWith(color: Pal.muted))),
+                      const SizedBox(width: 8),
+                      _cancelButton(id: _legId(l), compact: true),
+                    ]),
+                  ),
+              ],
+            ),
+          ),
+        const SizedBox(height: 6),
+        actions,
+      ]),
     );
   }
 }
