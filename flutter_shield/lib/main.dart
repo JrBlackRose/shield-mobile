@@ -1,5 +1,5 @@
 // ============================================================================
-// PROJECT SHIELD v4.3 — lib/main.dart  (UI shell only)
+// PROJECT SHIELD v4.4 — lib/main.dart  (UI shell only)
 //
 // Imports the pure core and the controller:
 //   shield_core.dart        risk math, formatting, models, watch-link types
@@ -340,7 +340,7 @@ class _ShieldHomeState extends State<ShieldHome> {
     return Scaffold(
       appBar: AppBar(
         titleSpacing: 12,
-        title: const Text('🛡️ SHIELD v4.3', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 17)),
+        title: const Text('🛡️ SHIELD v4.4', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 17)),
         actions: [
           if (c.updateAvailable)
             IconButton(
@@ -1026,7 +1026,7 @@ class _CopilotTabState extends State<CopilotTab> {
     (text: 'What is open right now?', sendNow: true),
     (text: 'Any bad news on my positions?', sendNow: true),
     (text: 'Stage NVDA swing', sendNow: false),
-    (text: 'Trim TSLA', sendNow: false),
+    (text: 'Close ETHUSD', sendNow: false),
   ];
 
   @override
@@ -1958,7 +1958,7 @@ class PortfolioTab extends StatelessWidget {
           title: '📂 Open positions (${c.positions.length})',
           child: c.positions.isEmpty
               ? const Text('Account is flat.', style: TextStyle(color: Pal.muted))
-              : Column(children: [for (final p in c.positions) _PositionRow(p: p, equity: eq, cap: cap, onChart: onChart)]),
+              : Column(children: [for (final p in c.positions) _PositionRow(c: c, p: p, equity: eq, cap: cap, onChart: onChart)]),
         ),
         Panel(
           title: '⏳ Open orders (${c.orders.length})',
@@ -2104,24 +2104,47 @@ class _TimelineItem extends StatelessWidget {
 // ---------------------------------------------------------------------------
 
 class _PositionRow extends StatelessWidget {
-  const _PositionRow({required this.p, required this.equity, required this.cap, required this.onChart});
+  const _PositionRow({required this.c, required this.p, required this.equity, required this.cap, required this.onChart});
+  final ShieldController c;
   final Position p;
   final Pips equity;
   final double cap;
   final void Function(String symbol) onChart;
 
+  Future<void> _confirmClose(BuildContext context) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Sell / Close ${p.symbol}?'),
+        content: Text(
+          'This cancels any open protective orders for ${p.symbol} and market-closes '
+          '${p.qtyText} sh (Current P&L: ${usd(p.unrealizedPl, sign: true)}).',
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Keep')),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Pal.danger, foregroundColor: Colors.white),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Confirm Sell'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final res = await c.closePosition(p.symbol);
+    showToast(res.message, !res.ok);
+  }
+
   @override
   Widget build(BuildContext context) {
     final pct = equity > 0 ? p.marketValue.abs() / equity * 100.0 : 0.0;
-    final Color tone = pct > cap
-        ? Pal.danger
-        : pct >= cap * .8
-            ? Pal.amber
-            : Pal.emerald;
+    final Color tone = pct > cap ? Pal.danger : (pct >= cap * .8 ? Pal.amber : Pal.emerald);
     final up = p.unrealizedPl >= 0;
+    final closing = c.isClosing(p.symbol);
+    final prot = c.protectionSummary(p.symbol);
     return Container(
       margin: const EdgeInsets.only(bottom: 8),
-      padding: const EdgeInsets.fromLTRB(10, 10, 2, 10),
+      padding: const EdgeInsets.fromLTRB(10, 10, 6, 10),
       decoration: BoxDecoration(color: Pal.bg, borderRadius: BorderRadius.circular(8), border: Border.all(color: Pal.border)),
       child: Row(children: [
         Expanded(
@@ -2132,19 +2155,32 @@ class _PositionRow extends StatelessWidget {
               Text(p.isLong ? 'LONG' : 'SHORT', style: const TextStyle(color: Pal.muted, fontSize: 10.5, fontWeight: FontWeight.w700)),
             ]),
             const SizedBox(height: 2),
-            Text('${p.qtyText} sh @ ${usd(p.avgEntry)} → ${usd(p.currentPrice)}', style: _mono.copyWith(fontSize: 11.5, color: Pal.muted)),
+            Text('${p.qtyText} sh @ ${usd(p.avgEntry)} -> ${usd(p.currentPrice)}', style: _mono.copyWith(fontSize: 11.5, color: Pal.muted)),
+            if (prot != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 3),
+                child: Text(prot, style: _mono.copyWith(fontSize: 11, color: Pal.sky)),
+              ),
           ]),
         ),
         Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
           Text(usd(p.unrealizedPl, sign: true), style: TextStyle(color: up ? Pal.emerald : Pal.dangerSoft, fontWeight: FontWeight.w800, fontSize: 14)),
           const SizedBox(height: 4),
-          Pill(pct > cap ? '⚠ ${pct.toStringAsFixed(1)}% eq' : '${pct.toStringAsFixed(1)}% eq', tone),
+          Pill(pct > cap ? '! ${pct.toStringAsFixed(1)}% eq' : '${pct.toStringAsFixed(1)}% eq', tone),
         ]),
         IconButton(
           tooltip: 'Chart ${p.symbol}',
           visualDensity: VisualDensity.compact,
           icon: const Icon(Icons.candlestick_chart_outlined, color: Pal.sky),
           onPressed: () => onChart(p.symbol),
+        ),
+        IconButton(
+          tooltip: 'Sell / Close ${p.symbol}',
+          visualDensity: VisualDensity.compact,
+          icon: closing
+              ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Pal.dangerSoft))
+              : const Icon(Icons.sell_outlined, color: Pal.dangerSoft),
+          onPressed: closing ? null : () => _confirmClose(context),
         ),
       ]),
     );
@@ -2349,7 +2385,7 @@ class _KeyVaultScreenState extends State<KeyVaultScreen> {
             child: ConstrainedBox(
               constraints: const BoxConstraints(maxWidth: 520),
               child: ListView(padding: const EdgeInsets.all(16), children: [
-                const Text('🛡️ Project Shield v4.0 — paper trading', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+                const Text('🛡️ Project Shield v4.4 — paper trading', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
                 const SizedBox(height: 6),
                 const Text(
                   'Keys are stored only on this device and sent only to Alpaca and Google. '

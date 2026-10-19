@@ -210,12 +210,12 @@ BracketPlan buildBracketPlan({
   );
 }
 
-Pips checkPriceDrift({required Pips stagedEntry, required Pips stopLoss, required Pips currentAsk}) {
+Pips checkPriceDrift({required Pips stagedEntry, required Pips stopLoss, required Pips currentAsk, int maxDriftBps = RiskRules.maxDriftOfStopBps,}) {
   final stopDistance = stagedEntry - stopLoss;
   if (stopDistance <= 0) throw const PlanAbort('Staged plan has an invalid stop distance.');
   if (currentAsk <= 0) throw const PlanAbort('Current ask must be positive.');
   final drift = (currentAsk - stagedEntry).abs();
-  if (drift * kBpsDenom > stopDistance * RiskRules.maxDriftOfStopBps) {
+  if (drift * kBpsDenom > stopDistance * maxDriftBps) {
     throw const RiskReject('Stale price: live ask moved too far from the approved entry. Re-stage the trade.');
   }
   return drift;
@@ -644,7 +644,7 @@ class FeedEvent {
           if (low.contains('gemini')) return 'Connected to Gemini';
           return 'Connected to Alpaca Paper';
         }
-        if (low.contains('mode')) return 'Trading Mode Changed';
+        if (RegExp(r'\bmode\b').hasMatch(low)) return 'Trading Mode Changed';
         if (low.contains('error') || low.contains('fail')) return 'Something Went Wrong';
         return 'System Notice';
     }
@@ -1024,8 +1024,10 @@ class AlpacaClient {
   }
 
   /// Crypto orders cannot use `day`; they must be `gtc` (or `ioc`).
-  String _tif(String symbol, Timeframe timeframe) =>
-      (isCryptoSymbol(symbol) || timeframe != Timeframe.intraday) ? 'gtc' : 'day';
+  String _tif(String symbol, Timeframe timeframe) {
+  if (isCryptoSymbol(symbol)) return 'ioc';
+  return timeframe != Timeframe.intraday ? 'gtc' : 'day';
+}
 
   /// Plain collared limit-buy entry (no bracket legs). Used for crypto, where
   /// Alpaca does not accept bracket orders.
