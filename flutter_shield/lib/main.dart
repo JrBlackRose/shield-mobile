@@ -1,5 +1,5 @@
 // ============================================================================
-// PROJECT SHIELD v4.4 — lib/main.dart  (UI shell only)
+// PROJECT SHIELD v4.6 — lib/main.dart  (UI shell only)
 //
 // Imports the pure core and the controller:
 //   shield_core.dart        risk math, formatting, models, watch-link types
@@ -340,7 +340,7 @@ class _ShieldHomeState extends State<ShieldHome> {
     return Scaffold(
       appBar: AppBar(
         titleSpacing: 12,
-        title: const Text('🛡️ SHIELD v4.4', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 17)),
+        title: const Text('🛡️ SHIELD v4.6', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 17)),
         actions: [
           if (c.updateAvailable)
             IconButton(
@@ -365,6 +365,12 @@ class _ShieldHomeState extends State<ShieldHome> {
                 Pill(auto ? '🤖 AUTO' : '📱 MANUAL', auto ? Pal.emerald : Pal.sky),
                 const SizedBox(width: 8),
                 const Pill('📄 PAPER', Pal.amber),
+                const SizedBox(width: 6),
+                 InkWell(
+                  borderRadius: BorderRadius.circular(999),
+                  onTap: c.toggleProMode,
+                  child: Pill(c.proMode ? '🛠️ PRO' : '✨ SIMPLE', c.proMode ? Pal.sky : Pal.emerald),
+                ),
               ]),
             ),
           ),
@@ -1960,8 +1966,9 @@ class PortfolioTab extends StatelessWidget {
               ? const Text('Account is flat.', style: TextStyle(color: Pal.muted))
               : Column(children: [for (final p in c.positions) _PositionRow(c: c, p: p, equity: eq, cap: cap, onChart: onChart)]),
         ),
+        if (c.proMode)
         Panel(
-          title: '⏳ Open orders (${c.orders.length})',
+          title: '⏳ Open orders — Pro View (${c.orders.length})',
           child: c.orders.isEmpty
               ? const Text('No open orders.', style: TextStyle(color: Pal.muted))
               : Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -2229,8 +2236,13 @@ class _PositionRow extends StatelessWidget {
               Text(p.isLong ? 'LONG' : 'SHORT', style: const TextStyle(color: Pal.muted, fontSize: 10.5, fontWeight: FontWeight.w700)),
             ]),
             const SizedBox(height: 2),
-            Text('${p.qtyText} sh @ ${usd(p.avgEntry)} -> ${usd(p.currentPrice)}', style: _mono.copyWith(fontSize: 11.5, color: Pal.muted)),
-            if (prot != null)
+            Text(
+              c.proMode
+                  ? '${p.qtyText} sh @ ${usd(p.avgEntry)} -> ${usd(p.currentPrice)}'
+                  : 'Entry ${usd(p.avgEntry)} · Now ${usd(p.currentPrice)}',
+              style: _mono.copyWith(fontSize: 11.5, color: Pal.muted),
+            ),
+            if (c.proMode && prot != null)
               Padding(
                 padding: const EdgeInsets.only(top: 3),
                 child: Text(prot, style: _mono.copyWith(fontSize: 11, color: Pal.sky)),

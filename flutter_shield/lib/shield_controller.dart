@@ -77,7 +77,7 @@ abstract final class NewsRules {
   static const Duration marketLookback = Duration(hours: 3);
   static const Duration rateLimitBackoff = Duration(minutes: 5);
   static const int fetchLimit = 30;
-  static const int scoreBatch = 12;
+  static const int scoreBatch = 6;
   static const int keepHeadlines = 40;
   static const int keepSignals = 40;
   static const int keepAlerts = 20;
@@ -90,7 +90,8 @@ abstract final class AutoRules {
   static const Duration newsFreshness = Duration(minutes: 30); // older headlines never trigger entries
   static const Duration signalMaxAge = Duration(hours: 3); // older bullish signals leave the pool
   static const Duration symbolCooldown = Duration(minutes: 20); // don't re-pick the same symbol
-  static const int maxCandidates = 40;
+  static const int maxCandidates = 30;
+  static const int maxAutoPositions = 4; // Focus capital on max 4 high-conviction trades
   static const Duration copilotActionTtl = Duration(minutes: 5);
 }
 
@@ -102,7 +103,7 @@ abstract final class DataRules {
 }
 
 abstract final class UpdateRules {
-  static const String currentVersion = '4.5.0';
+  static const String currentVersion = '4.6.0';
   static const String versionUrl =
       'https://raw.githubusercontent.com/JrBlackRose/shield-mobile/main/version.json';
   static const Duration minInterval = Duration(hours: 6);
@@ -578,6 +579,14 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
   List<PendingCard> pendingCards = [];
   List<FeedEvent> feed = [];
   bool allowOffHoursStaging = false, tradeSubmitting = false, scanInProgress = false;
+  bool proMode = false;
+  final Map<String, DateTime> _entryTimes = <String, DateTime>{};
+
+  void toggleProMode() {
+    proMode = !proMode;
+    _prefs.setBool('sh_pro', proMode);
+    notifyListeners();
+  }
   TradeResult? lastTradeResult;
   AiDecision? lastAiDecision;
   final ValueNotifier<DateTime> now = ValueNotifier(DateTime.now().toUtc());
@@ -667,6 +676,7 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
       tgChat: p.getString('sh_tc') ?? '',
     );
     executionMode = p.getString('sh_mode') == 'auto' ? ExecMode.auto : ExecMode.manual;
+    proMode = p.getBool('sh_pro') ?? false;
     try {
       feed = (jsonDecode(p.getString('sh_feed') ?? '[]') as List)
           .map((e) => FeedEvent.fromJson((e as Map).cast<String, dynamic>()))
@@ -1268,6 +1278,7 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
 
   Future<void> _runAutonomousAgent() async {
     if (_agentBusy || executionMode != ExecMode.auto || tradeSubmitting) return;
+    if (positions.length >= AutoRules.maxAutoPositions) return; // Cap concurrent positions to prevent over-diversified bleed
     if (!aiScannerEnabled || client == null || vaultStatus != VaultStatus.valid) return;
     if (connectionStatus != ConnectionStatus.connected || autoLockReason != null) return;
     final nowUtc = DateTime.now().toUtc();
@@ -1283,6 +1294,7 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
       final pick = _parseScoutPick(raw, candidates.toSet());
       if (pick == null) return; // no high-conviction setup this round
       if (executionMode != ExecMode.auto || autoLockReason != null || tradeSubmitting) return;
+    if (positions.length >= AutoRules.maxAutoPositions) return;
       _agentTried[pick] = DateTime.now().toUtc();
       _log('🤖 Autonomous Scout selected $pick — evaluating live AUTO entry', level: 'info', notify: false);
       await triggerTrade(
@@ -1562,6 +1574,7 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
           clientOrderId: 'shield-$token',
         );
         final id = (order['id'] ?? '?').toString();
+        _entryTimes[sym] = DateTime.now().toUtc();
         lastTradeResult = AutoExecuted(id, plan);
         _log(
             '🤖 AUTO ${tfLabel(timeframe)} $sym ${plan.qtyText} ≤ ${priceStr(plan.limitCollar)} [$source] → order ${id.length > 8 ? id.substring(0, 8) : id}',
@@ -2064,14 +2077,21 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
     return null;
   }
 
-  /// Longs are at risk when sentiment <= 0.22, OR sentiment <= 0.32 while the position is losing money.
-  /// Prevents premature panic-selling of profitable positions on minor market noise.
+  /// Smart Volatility & Profit Shield:
+  /// 1. NEVER panic-sell a profitable position on news (let winners run to TP / trail).
+  /// 2. Ignore mild news during the first 30 minutes after entry (prevents 60-second BTCUSD whipsaws).
+  /// 3. Require meaningful drawdown (< -0.75%) + very bearish sentiment (<= 0.20) before Auto-Defense cuts early.
   bool _atRisk(Position p, double sentiment) {
-    if (p.isLong) {
-      if (sentiment <= 0.22) return true;
-      return sentiment <= 0.32 && p.unrealizedPl < 0;
+    if (!p.isLong) return sentiment >= 1.0 - NewsRules.bearishSentiment;
+    if (p.unrealizedPl >= 0) return false; // Never cut a green trade on news noise!
+    final sym = normSym(p.symbol);
+    final openedAt = _entryTimes[sym];
+    if (openedAt != null && DateTime.now().toUtc().difference(openedAt) < const Duration(minutes: 30)) {
+      return sentiment <= 0.12; // 30-min grace period after buying
     }
-    return sentiment >= 1.0 - NewsRules.bearishSentiment;
+    final lossBps = p.avgEntry > 0 ? ((p.avgEntry - p.currentPrice) * kBpsDenom) ~/ p.avgEntry : 0;
+    if (lossBps < 75) return false; // Ignore bid-ask spread & minor <0.75% pullbacks
+    return sentiment <= 0.20;
   }
 
   /// Pulls Alpaca live news (held-ticker news + general tape), sends unseen
@@ -2209,6 +2229,7 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
     final sym = _cleanSym(ticker);
     if (sym == null) return;
     if (executionMode != ExecMode.auto || autoLockReason != null || tradeSubmitting) return;
+    if (positions.length >= AutoRules.maxAutoPositions) return;
     _agentTried[sym] = DateTime.now().toUtc();
     _log('🤖 Auto AI News: $sym bullish ${sentiment.toStringAsFixed(2)} — evaluating live AUTO entry',
         level: 'info', notify: false);
