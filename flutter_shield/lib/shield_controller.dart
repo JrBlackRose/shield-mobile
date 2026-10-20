@@ -102,7 +102,7 @@ abstract final class DataRules {
 }
 
 abstract final class UpdateRules {
-  static const String currentVersion = '4.4.0';
+  static const String currentVersion = '4.5.0';
   static const String versionUrl =
       'https://raw.githubusercontent.com/JrBlackRose/shield-mobile/main/version.json';
   static const Duration minInterval = Duration(hours: 6);
@@ -384,6 +384,23 @@ class CopilotUnsupported extends CopilotAction {
   final String type;
 }
 
+class ClosedTrade {
+  const ClosedTrade({
+    required this.symbol,
+    required this.qtyText,
+    required this.buyPrice,
+    required this.sellPrice,
+    required this.pnlPips,
+    required this.pnlPct,
+    required this.closedAt,
+  });
+  final String symbol, qtyText;
+  final Pips buyPrice, sellPrice, pnlPips;
+  final double pnlPct;
+  final DateTime closedAt;
+  bool get isWin => pnlPips >= 0;
+}
+
 class CopilotReply {
   const CopilotReply(this.text, this.action);
   final String text;
@@ -512,6 +529,7 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
   Account? account;
   List<Position> positions = [];
   List<OrderSummary> orders = [];
+  List<ClosedTrade> closedTrades = [];
   static const MethodChannel _native = MethodChannel('shield/native');
   List<Map<String, dynamic>> _rawOrders = [];
 
@@ -939,9 +957,119 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
 
   bool _tradableNow(String sym) => _resolveVenue(sym) != VenueKind.closed;
 
+  /// Returns true when crypto should be paused (first 45m of US open whipsaw or >30% crypto allocation during US session).
+  bool _cryptoBlockedBySession(DateTime nowUtc) {
+    final eq = account?.equity ?? 0;
+    if (eq > 0) {
+      final cGross = cryptoGrossPips(positions, _rawOrders);
+      final capBps = sessionOpen ? 3000 : 4500; // 30% max crypto when US market open (70% US stocks)
+      if (cGross >= (eq * capBps ~/ kBpsDenom)) return true;
+    }
+    if (sessionOpen) {
+      final n = nyTime(nowUtc);
+      final m = n.hour * 60 + n.minute;
+      // Block new crypto entries during volatile US open window (09:30 - 10:15 ET)
+      if (m >= 570 && m <= 615) return true;
+    }
+    return false;
+  }
+
+  Future<void> _refreshClosedHistory() async {
+    final cl = client;
+    if (cl == null || vaultStatus != VaultStatus.valid) return;
+    try {
+      final raw = await _extras().closedOrders(limit: 120);
+      closedTrades = _buildClosedTrades(raw, positions);
+    } catch (_) {}
+  }
+
+  Future<void> _harvestPredictableStockProfits() async {
+    if (executionMode != ExecMode.auto || !sessionOpen) return;
+    for (final p in positions) {
+      if (isCryptoSymbol(p.symbol) || !p.isLong || p.avgEntry <= 0) continue;
+      final sym = normSym(p.symbol);
+      if (_closing.contains(sym)) continue;
+      final gainBps = ((p.currentPrice - p.avgEntry) * kBpsDenom) ~/ p.avgEntry;
+      // Predictable profit lock: if a stock has no TP order or hits +1.85% intraday gain, harvest cleanly
+      if (gainBps >= 185) {
+        _log('💰 Predictable Profit Lock triggered on $sym (+${(gainBps / 100.0).toStringAsFixed(2)}%) — banking win', level: 'ok');
+        final res = await closePosition(sym);
+        unawaited(_notifyOS('💰 Profit Banked: $sym', res.message));
+      }
+    }
+  }
+
   // ==========================================================================
   // Polling: account + positions + orders + clock (5 s, foreground only)
   // ==========================================================================
+
+
+  List<ClosedTrade> _buildClosedTrades(List<Map<String, dynamic>> rawClosed, List<Position> openPositions) {
+    final fills = <({String sym, String side, double qty, Pips price, DateTime at})>[];
+    void extract(Map<String, dynamic> o) {
+      final st = '${o['status'] ?? ''}'.toLowerCase();
+      final fq = double.tryParse('${o['filled_qty'] ?? '0'}') ?? 0.0;
+      final fp = tryPips(o['filled_avg_price']);
+      final sym = _cleanSym(o['symbol']);
+      final side = '${o['side'] ?? ''}'.toLowerCase();
+      final at = DateTime.tryParse('${o['filled_at'] ?? o['updated_at'] ?? o['created_at']}')?.toUtc();
+      if ((st == 'filled' || st == 'partially_filled') && fq > 0 && fp != null && fp > 0 && sym != null && at != null) {
+        fills.add((sym: sym, side: side, qty: fq, price: fp, at: at));
+      }
+      final legs = o['legs'];
+      if (legs is List) {
+        for (final l in legs.whereType<Map>()) {
+          extract(l.cast<String, dynamic>());
+        }
+      }
+    }
+    for (final o in rawClosed) {
+      extract(o);
+    }
+    fills.sort((a, b) => a.at.compareTo(b.at));
+    final buyLots = <String, List<({double qty, Pips price})>>{};
+    final out = <ClosedTrade>[];
+
+    for (final f in fills) {
+      if (f.side == 'buy') {
+        buyLots.putIfAbsent(f.sym, () => []).add((qty: f.qty, price: f.price));
+      } else if (f.side == 'sell') {
+        final lots = buyLots[f.sym];
+        var rem = f.qty;
+        var costSum = 0.0;
+        var matchedQty = 0.0;
+        if (lots != null && lots.isNotEmpty) {
+          while (rem > 1e-7 && lots.isNotEmpty) {
+            final first = lots.first;
+            final take = math.min(rem, first.qty);
+            costSum += take * first.price;
+            matchedQty += take;
+            rem -= take;
+            if (first.qty - take <= 1e-7) {
+              lots.removeAt(0);
+            } else {
+              lots[0] = (qty: first.qty - take, price: first.price);
+            }
+          }
+        }
+        if (matchedQty > 1e-6) {
+          final avgBuy = (costSum / matchedQty).round();
+          final pnlPips = ((f.price - avgBuy) * matchedQty).round();
+          final pnlPct = avgBuy > 0 ? ((f.price - avgBuy) / avgBuy) * 100.0 : 0.0;
+          out.add(ClosedTrade(
+            symbol: f.sym,
+            qtyText: formatQty(matchedQty),
+            buyPrice: avgBuy,
+            sellPrice: f.price,
+            pnlPips: pnlPips,
+            pnlPct: pnlPct,
+            closedAt: f.at,
+          ));
+        }
+      }
+    }
+    return out.reversed.toList();
+  }
 
   Future<void> refresh() async {
     final cl = client;
@@ -951,8 +1079,11 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
       final fa = cl.getAccount(), fp = cl.getPositions(), fo = cl.getOpenOrders(), fc = cl.getClock();
       await Future.wait<Object?>([fa, fp, fo, fc]);
       account = Account.fromJson(await fa);
-      positions = (await fp).map(Position.fromJson).toList();
+      // Filter out < $1.00 fractional crypto dust so 0-sh positions never clutter UI or trigger 422
+      positions = (await fp).map(Position.fromJson).where((p) => p.marketValue.abs() >= kPipsPerUsd && p.qtyDouble >= 0.0001).toList();
       final rawOrd = await fo;
+      unawaited(_refreshClosedHistory());
+      unawaited(_harvestPredictableStockProfits());
       _rawOrders = rawOrd;
       orders = rawOrd.take(50).map(OrderSummary.fromJson).toList();
       _applyClock(await fc);
@@ -1054,12 +1185,19 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
     };
     final seen = <String>{};
     final out = <String>[];
+    final blockCrypto = _cryptoBlockedBySession(nowUtc);
+    final stocks = <String>[];
+    final cryptos = <String>[];
     void add(Object? raw) {
       final s = _cleanSym(raw);
       if (s == null || !seen.add(s)) return;
       if (held.contains(s) || bearish.contains(s) || _agentCooling(s, nowUtc)) return;
       if (_resolveVenue(s) == VenueKind.closed) return;
-      out.add(s);
+      if (isCryptoSymbol(s)) {
+        if (!blockCrypto) cryptos.add(s);
+      } else {
+        stocks.add(s);
+      }
     }
 
     for (final s in newsSignals) {
@@ -1074,6 +1212,16 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
     }
     for (final u in dynamicScanUniverse(nowUtc, clockOpen: sessionOpen)) {
       add(u);
+    }
+    // 70% US Stock / 30% Crypto priority: during US Market Open, feed US stocks first;
+    // only include up to 25% crypto candidates if US stocks are scarce or capped.
+    if (sessionOpen && stocks.isNotEmpty) {
+      final maxStock = (AutoRules.maxCandidates * 0.75).round();
+      out.addAll(stocks.take(maxStock));
+      out.addAll(cryptos.take(AutoRules.maxCandidates - out.length));
+    } else {
+      out.addAll(stocks);
+      out.addAll(cryptos);
     }
     return out.take(AutoRules.maxCandidates).toList();
   }
@@ -1916,9 +2064,15 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
     return null;
   }
 
-  /// Longs are at risk when sentiment <= 0.35; a short would mirror that (>= 0.65).
-  bool _atRisk(Position p, double sentiment) =>
-      p.isLong ? sentiment <= NewsRules.bearishSentiment : sentiment >= 1.0 - NewsRules.bearishSentiment;
+  /// Longs are at risk when sentiment <= 0.22, OR sentiment <= 0.32 while the position is losing money.
+  /// Prevents premature panic-selling of profitable positions on minor market noise.
+  bool _atRisk(Position p, double sentiment) {
+    if (p.isLong) {
+      if (sentiment <= 0.22) return true;
+      return sentiment <= 0.32 && p.unrealizedPl < 0;
+    }
+    return sentiment >= 1.0 - NewsRules.bearishSentiment;
+  }
 
   /// Pulls Alpaca live news (held-ticker news + general tape), sends unseen
   /// headlines plus the held tickers to Gemini in ONE batched call, and raises
@@ -2817,6 +2971,15 @@ class _AlpacaExtras {
   }
 
   // ---- orders ----------------------------------------------------------------
+
+  Future<List<Map<String, dynamic>>> closedOrders({int limit = 120}) async => _list(
+        await _get(Uri.parse('$kPaperBase/orders').replace(queryParameters: {
+          'status': 'closed',
+          'limit': '$limit',
+          'direction': 'desc',
+          'nested': 'true',
+        })),
+      );
 
   Future<List<Map<String, dynamic>>> _openOrdersFor(String symbol) async => _list(
         await _get(Uri.parse('$kPaperBase/orders').replace(queryParameters: {

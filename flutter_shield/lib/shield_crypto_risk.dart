@@ -15,12 +15,12 @@ AssetClass assetClassOf(String sym) => isCryptoSymbol(sym) ? AssetClass.crypto :
 abstract final class CryptoRules {
   // Sizing: the smallest of three limits wins.
   static const int riskBudgetBps = 50; // lose <= 0.50% of equity if the stop-limit fills, fees included
-  static const int assetCapBps = 600; // 6% of equity in any one coin
-  static const int classCapBps = 1500; // 15% across ALL crypto (one correlated cluster, rho ~0.8+)
+  static const int assetCapBps = 1000; // 10% max per coin
+  static const int classCapBps = 3000; // 30% max across ALL crypto (70% reserved for US stocks)
 
   // Entry gates.
-  static const double maxSpread = 75.0; // bps; calibrated for Alpaca crypto books
-  static const double regimeSkipRatio = 2.5; // fast/slow vol above this => skip entry
+  static const double maxSpread = 55.0; // tighter spread filter for crypto
+  static const double regimeSkipRatio = 1.85; // skip crypto during volatile whipsaws
   static const double minRiskScale = 0.4; // floor for the "hot regime" risk haircut
   static const int maxDriftOfStopBps = 500; // 5% of stop distance (equities: 20%)
 
@@ -38,14 +38,14 @@ abstract final class CryptoRules {
   static const int makerFeeBps = 15;
 
   // Trailing.
-  static const double breakevenAtR = 1.0;
-  static const int breakevenLockBps = 60; // > buy fee 25 + sell fee 25 + cushion
-  static const double trailStartR = 2.0;
-  static const double trailKStart = 3.0; // ATR multiples
-  static const double trailKMin = 1.5;
-  static const double minStepAtrFrac = 0.25; // hysteresis: don't PATCH for crumbs
-  static const int minStopGapBps = 10; // a sell stop must sit below the market
-  static const double refTargetR = 3.0; // display-only target; no TP order exists
+  static const double breakevenAtR = 0.65;
+  static const int breakevenLockBps = 65; // > buy fee 25 + sell fee 25 + cushion
+  static const double trailStartR = 1.1;
+  static const double trailKStart = 2.0; // tighter profit trail
+  static const double trailKMin = 1.0;
+  static const double minStepAtrFrac = 0.20;
+  static const int minStopGapBps = 10;
+  static const double refTargetR = 1.8; // predictable profit target
 }
 
 double? wilderAtr(List<CryptoBar> bars, {int period = 14}) {

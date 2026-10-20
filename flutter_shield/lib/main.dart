@@ -1991,6 +1991,15 @@ class PortfolioTab extends StatelessWidget {
                 ]),
         ),
         Panel(
+          title: '📜 Trade history (${c.closedTrades.length})',
+          trailing: _TradeScorecard(trades: c.closedTrades),
+          child: c.closedTrades.isEmpty
+              ? const Text('No completed round-trip trades in recent history.', style: TextStyle(color: Pal.muted))
+              : Column(children: [
+                  for (final t in c.closedTrades.take(25)) _ClosedTradeRow(t: t, onChart: onChart),
+                ]),
+        ),
+        Panel(
           title: '🕘 Activity timeline',
           trailing: Text('last $kFeedMax', style: const TextStyle(color: Pal.muted, fontSize: 11.5)),
           child: ValueListenableBuilder<DateTime>(
@@ -2102,6 +2111,71 @@ class _TimelineItem extends StatelessWidget {
 // ---------------------------------------------------------------------------
 // Position + Order rows
 // ---------------------------------------------------------------------------
+
+class _TradeScorecard extends StatelessWidget {
+  const _TradeScorecard({required this.trades});
+  final List<ClosedTrade> trades;
+
+  @override
+  Widget build(BuildContext context) {
+    if (trades.isEmpty) return const SizedBox.shrink();
+    final wins = trades.where((t) => t.isWin).length;
+    final losses = trades.length - wins;
+    final net = trades.fold<int>(0, (a, b) => a + b.pnlPips);
+    final up = net >= 0;
+    return Row(mainAxisSize: MainAxisSize.min, children: [
+      Text('${wins}W / ${losses}L · ', style: const TextStyle(color: Pal.muted, fontSize: 11.5, fontWeight: FontWeight.w700)),
+      Text(usd(net, sign: true), style: TextStyle(color: up ? Pal.emerald : Pal.dangerSoft, fontSize: 12, fontWeight: FontWeight.w800)),
+    ]);
+  }
+}
+
+class _ClosedTradeRow extends StatelessWidget {
+  const _ClosedTradeRow({required this.t, required this.onChart});
+  final ClosedTrade t;
+  final void Function(String symbol) onChart;
+
+  @override
+  Widget build(BuildContext context) {
+    final up = t.isWin;
+    final tone = up ? Pal.emerald : Pal.dangerSoft;
+    final local = t.closedAt.toLocal();
+    final ts = '${two(local.month)}/${two(local.day)} ${two(local.hour)}:${two(local.minute)}';
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.fromLTRB(10, 8, 8, 8),
+      decoration: BoxDecoration(color: Pal.bg, borderRadius: BorderRadius.circular(8), border: Border.all(color: Pal.border)),
+      child: Row(children: [
+        Expanded(
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Row(children: [
+              Text(t.symbol, style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 14)),
+              const SizedBox(width: 6),
+              _Tag(up ? 'WIN' : 'LOSS', tone),
+              const SizedBox(width: 6),
+              Text(ts, style: const TextStyle(color: Pal.muted, fontSize: 11)),
+            ]),
+            const SizedBox(height: 3),
+            Text('Bought ${t.qtyText} @ ${usd(t.buyPrice)}  →  Sold @ ${usd(t.sellPrice)}',
+                style: _mono.copyWith(fontSize: 11.5, color: Pal.muted)),
+          ]),
+        ),
+        Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
+          Text(usd(t.pnlPips, sign: true), style: TextStyle(color: tone, fontWeight: FontWeight.w800, fontSize: 14)),
+          const SizedBox(height: 2),
+          Text('${t.pnlPct >= 0 ? '+' : ''}${t.pnlPct.toStringAsFixed(2)}%',
+              style: _mono.copyWith(color: tone, fontSize: 11, fontWeight: FontWeight.w700)),
+        ]),
+        IconButton(
+          tooltip: 'Chart ${t.symbol}',
+          visualDensity: VisualDensity.compact,
+          icon: const Icon(Icons.candlestick_chart_outlined, color: Pal.sky, size: 18),
+          onPressed: () => onChart(t.symbol),
+        ),
+      ]),
+    );
+  }
+}
 
 class _PositionRow extends StatelessWidget {
   const _PositionRow({required this.c, required this.p, required this.equity, required this.cap, required this.onChart});

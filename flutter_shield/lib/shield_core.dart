@@ -27,10 +27,10 @@ abstract final class RiskRules {
   static const int riskBudgetBps = 100;
   static const int notionalCapBps = 1500;
   static const int collarBps = 15;
-  static const int swingStopBps = 1000;
-  static const int swingTargetBps = 3000;
-  static const int intradayStopBps = 100;
-  static const int intradayTargetBps = 300;
+  static const int swingStopBps = 175;
+  static const int swingTargetBps = 350;
+  static const int intradayStopBps = 90;
+  static const int intradayTargetBps = 180;
   static const int maxDriftOfStopBps = 2000;
 }
 

@@ -142,7 +142,7 @@ class _CryptoGuardian {
       final ex = c._extras();
       final held = <String, Position>{
         for (final p in c.positions)
-          if (p.isLong && isCryptoSymbol(p.symbol) && p.qtyDouble > 0) normSym(p.symbol): p,
+          if (p.isLong && isCryptoSymbol(p.symbol) && p.qtyDouble >= 0.0001 && p.marketValue.abs() >= kPipsPerUsd) normSym(p.symbol): p,
       };
 
       var dirty = false;
@@ -226,6 +226,15 @@ class _CryptoGuardian {
       _breach.remove(sym);
     }
 
+    final qtyTxt = floorQtyText(p.qtyDouble);
+    if ((double.tryParse(qtyTxt) ?? 0.0) <= 0.0) return;
+    // Predictable Crypto Profit Harvester: bank profit automatically at +2.2% gain
+    if (p.avgEntry > 0 && last >= (p.avgEntry * 10220 ~/ 10000)) {
+      c._log('💰 GUARDIAN banking predictable crypto profit on $sym (+${((last - p.avgEntry) / p.avgEntry * 100).toStringAsFixed(2)}%)', level: 'ok');
+      final res = await c.closePosition(sym);
+      unawaited(c._notifyOS('💰 Crypto Profit Banked: $sym', res.message));
+      return;
+    }
     if (stopOrder == null) {
       final ceiling = last * (kBpsDenom - CryptoRules.minStopGapBps) ~/ kBpsDenom;
       final stop = roundToTick(math.min(t.stop, ceiling));
