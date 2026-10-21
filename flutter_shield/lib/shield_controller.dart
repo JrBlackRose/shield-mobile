@@ -103,7 +103,7 @@ abstract final class DataRules {
 }
 
 abstract final class UpdateRules {
-  static const String currentVersion = '4.6.0';
+  static const String currentVersion = '4.7.0';
   static const String versionUrl =
       'https://raw.githubusercontent.com/JrBlackRose/shield-mobile/main/version.json';
   static const Duration minInterval = Duration(hours: 6);
@@ -993,18 +993,58 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
     } catch (_) {}
   }
 
+  int get _activeSlotCount => {...heldSymbols, ...queuedSymbols}.length;
+
+  int _recentStockDayTrades() {
+    final cutoff = DateTime.now().toUtc().subtract(const Duration(days: 5));
+    var count = 0;
+    for (final t in closedTrades) {
+      if (!isCryptoSymbol(t.symbol) && t.closedAt.isAfter(cutoff)) count++;
+    }
+    return count;
+  }
+
   Future<void> _harvestPredictableStockProfits() async {
-    if (executionMode != ExecMode.auto || !sessionOpen) return;
+    if (!sessionOpen) return;
+    final n = nyTime(DateTime.now().toUtc());
+    final m = n.hour * 60 + n.minute;
+    final isEodWindow = m >= 954 && m < 960; // 15:54 - 15:59 ET: flatten expiring DAY brackets before 16:00 close
+
     for (final p in positions) {
       if (isCryptoSymbol(p.symbol) || !p.isLong || p.avgEntry <= 0) continue;
       final sym = normSym(p.symbol);
       if (_closing.contains(sym)) continue;
-      final gainBps = ((p.currentPrice - p.avgEntry) * kBpsDenom) ~/ p.avgEntry;
-      // Predictable profit lock: if a stock has no TP order or hits +1.85% intraday gain, harvest cleanly
-      if (gainBps >= 185) {
-        _log('💰 Predictable Profit Lock triggered on $sym (+${(gainBps / 100.0).toStringAsFixed(2)}%) — banking win', level: 'ok');
+
+      var hasActiveSell = false;
+      var hasExpiringDayLeg = false;
+      for (final o in _rawOrders) {
+        final st = '${o['status'] ?? ''}'.toLowerCase();
+        if (st == 'canceled' || st == 'expired' || st == 'rejected') continue;
+        if (normSym('${o['symbol'] ?? ''}') == sym && '${o['side']}' == 'sell') {
+          hasActiveSell = true;
+          if ('${o['time_in_force'] ?? ''}'.toLowerCase() == 'day') hasExpiringDayLeg = true;
+        }
+      }
+
+      if (isEodWindow && (hasExpiringDayLeg || !hasActiveSell)) {
+        _log('🕒 EOD Flatten: closing intraday stock $sym before 16:00 ET leg expiration', level: 'warn');
         final res = await closePosition(sym);
-        unawaited(_notifyOS('💰 Profit Banked: $sym', res.message));
+        unawaited(_notifyOS('🕒 EOD Flatten: $sym', res.message));
+        continue;
+      }
+
+      // Stock Guardian Backstop: only step in if a stock has NO active bracket sell orders on Alpaca
+      if (!hasActiveSell && executionMode == ExecMode.auto) {
+        final gainBps = ((p.currentPrice - p.avgEntry) * kBpsDenom) ~/ p.avgEntry;
+        if (gainBps <= -150) {
+          _log('🛡️ Stock Guardian stop-loss triggered on unprotected $sym (${(gainBps / 100.0).toStringAsFixed(2)}%)', level: 'error');
+          final res = await closePosition(sym);
+          unawaited(_notifyOS('🛡️ Unprotected Stock Stop: $sym', res.message));
+        } else if (gainBps >= 240) {
+          _log('💰 Stock Guardian banking +${(gainBps / 100.0).toStringAsFixed(2)}% on unprotected $sym', level: 'ok');
+          final res = await closePosition(sym);
+          unawaited(_notifyOS('💰 Stock Profit Banked: $sym', res.message));
+        }
       }
     }
   }
@@ -1089,8 +1129,8 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
       final fa = cl.getAccount(), fp = cl.getPositions(), fo = cl.getOpenOrders(), fc = cl.getClock();
       await Future.wait<Object?>([fa, fp, fo, fc]);
       account = Account.fromJson(await fa);
-      // Filter out < $1.00 fractional crypto dust so 0-sh positions never clutter UI or trigger 422
-      positions = (await fp).map(Position.fromJson).where((p) => p.marketValue.abs() >= kPipsPerUsd && p.qtyDouble >= 0.0001).toList();
+      // Filter out < $1.50 dust using notional value so micro-BTC positions (0.00009975 BTC) stay protected
+      positions = (await fp).map(Position.fromJson).where((p) => p.marketValue.abs() >= (kPipsPerUsd * 3 ~/ 2) && p.qtyDouble >= 0.000001).toList();
       final rawOrd = await fo;
       unawaited(_refreshClosedHistory());
       unawaited(_harvestPredictableStockProfits());
@@ -1278,7 +1318,7 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
 
   Future<void> _runAutonomousAgent() async {
     if (_agentBusy || executionMode != ExecMode.auto || tradeSubmitting) return;
-    if (positions.length >= AutoRules.maxAutoPositions) return; // Cap concurrent positions to prevent over-diversified bleed
+    if (_activeSlotCount >= AutoRules.maxAutoPositions) return; // Cap held + queued positions at 4
     if (!aiScannerEnabled || client == null || vaultStatus != VaultStatus.valid) return;
     if (connectionStatus != ConnectionStatus.connected || autoLockReason != null) return;
     final nowUtc = DateTime.now().toUtc();
@@ -1294,7 +1334,7 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
       final pick = _parseScoutPick(raw, candidates.toSet());
       if (pick == null) return; // no high-conviction setup this round
       if (executionMode != ExecMode.auto || autoLockReason != null || tradeSubmitting) return;
-    if (positions.length >= AutoRules.maxAutoPositions) return;
+    if (_activeSlotCount >= AutoRules.maxAutoPositions) return;
       _agentTried[pick] = DateTime.now().toUtc();
       _log('🤖 Autonomous Scout selected $pick — evaluating live AUTO entry', level: 'info', notify: false);
       await triggerTrade(
@@ -1511,6 +1551,19 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
       if (!offHours) await _venueGate(sym, timeframe);
 
       final qs = await _liveQuote(sym);
+      if (!crypto && qs.ask < 10 * kPipsPerUsd) {
+        throw RiskReject('Penny / sub-\$10 stock filter: $sym is ${priceStr(qs.ask)} (min \$10.00 required).');
+      }
+      if (!crypto && !offHours && sessionOpen) {
+        final ny = nyTime(DateTime.now().toUtc());
+        final mins = ny.hour * 60 + ny.minute;
+        if (mins >= 570 && mins < 576) {
+          throw const RiskReject('US Open 6-min spread blackout (09:30–09:36 ET). Waiting for spreads to stabilize.');
+        }
+      }
+      if (!crypto && timeframe == Timeframe.intraday && acct.equity < 25000 * kPipsPerUsd && _recentStockDayTrades() >= 3) {
+        throw const RiskReject('PDT Shield: 3/3 rolling stock day-trades used on sub-\$25k account.');
+      }
       if (!qs.fromSnapshot && !offHours) {
         if (qs.spreadBps >= 9999) throw PlanAbort('No valid two-sided quote for $sym. Trade aborted.');
         final maxSpread = crypto ? CryptoRules.maxSpread : maxSpreadBps(timeframe);

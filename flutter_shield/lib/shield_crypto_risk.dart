@@ -25,11 +25,11 @@ abstract final class CryptoRules {
   static const int maxDriftOfStopBps = 500; // 5% of stop distance (equities: 20%)
 
   // Stop construction.
-  static const double kAtr = 3.0; // x ATR(14) on 1h bars
-  static const double kSigma = 2.5; // x sigma scaled to the holding horizon
-  static const double horizonHours = 6.0;
-  static const int stopFloorBps = 150;
-  static const int stopCeilBps = 800;
+  static const double kAtr = 2.0; // x ATR(14) on 1h bars
+  static const double kSigma = 1.6; // x sigma scaled to holding horizon
+  static const double horizonHours = 3.0;
+  static const int stopFloorBps = 135;
+  static const int stopCeilBps = 240; // cap crypto initial stop at -2.40% for positive payoff
   static const int stopLimitMinOffsetBps = 40; // gap protection under the trigger
   static const double stopLimitAtrFrac = 0.25;
 
@@ -40,12 +40,12 @@ abstract final class CryptoRules {
   // Trailing.
   static const double breakevenAtR = 0.65;
   static const int breakevenLockBps = 65; // > buy fee 25 + sell fee 25 + cushion
-  static const double trailStartR = 1.1;
-  static const double trailKStart = 2.0; // tighter profit trail
-  static const double trailKMin = 1.0;
-  static const double minStepAtrFrac = 0.20;
+  static const double trailStartR = 1.0;
+  static const double trailKStart = 1.5; // tighter chandelier trail
+  static const double trailKMin = 0.85;
+  static const double minStepAtrFrac = 0.18;
   static const int minStopGapBps = 10;
-  static const double refTargetR = 1.8; // predictable profit target
+  static const double refTargetR = 2.2; // positive expectancy R target
 }
 
 double? wilderAtr(List<CryptoBar> bars, {int period = 14}) {

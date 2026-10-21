@@ -1,5 +1,5 @@
 // ============================================================================
-// PROJECT SHIELD v4.6 — lib/main.dart  (UI shell only)
+// PROJECT SHIELD v4.7 — lib/main.dart  (UI shell only)
 //
 // Imports the pure core and the controller:
 //   shield_core.dart        risk math, formatting, models, watch-link types

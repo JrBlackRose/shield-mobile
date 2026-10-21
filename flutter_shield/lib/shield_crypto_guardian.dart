@@ -142,7 +142,7 @@ class _CryptoGuardian {
       final ex = c._extras();
       final held = <String, Position>{
         for (final p in c.positions)
-          if (p.isLong && isCryptoSymbol(p.symbol) && p.qtyDouble >= 0.0001 && p.marketValue.abs() >= kPipsPerUsd) normSym(p.symbol): p,
+          if (p.isLong && isCryptoSymbol(p.symbol) && p.qtyDouble >= 0.000001 && p.marketValue.abs() >= (kPipsPerUsd * 3 ~/ 2)) normSym(p.symbol): p,
       };
 
       var dirty = false;
@@ -227,12 +227,13 @@ class _CryptoGuardian {
     }
 
     final qtyTxt = floorQtyText(p.qtyDouble);
-    if ((double.tryParse(qtyTxt) ?? 0.0) <= 0.0) return;
-    // Predictable Crypto Profit Harvester: bank profit automatically at +2.2% gain
-    if (p.avgEntry > 0 && last >= (p.avgEntry * 10220 ~/ 10000)) {
-      c._log('💰 GUARDIAN banking predictable crypto profit on $sym (+${((last - p.avgEntry) / p.avgEntry * 100).toStringAsFixed(2)}%)', level: 'ok');
+    final targetQty = double.tryParse(qtyTxt) ?? 0.0;
+    if (targetQty <= 0.0) return;
+    // Let trailing stop work; only hard-harvest crypto on a >= +4.2% (>2R) surge
+    if (p.avgEntry > 0 && last >= (p.avgEntry * 10420 ~/ 10000)) {
+      c._log('💰 GUARDIAN banking >2R crypto surge on $sym (+${((last - p.avgEntry) / p.avgEntry * 100).toStringAsFixed(2)}%)', level: 'ok');
       final res = await c.closePosition(sym);
-      unawaited(c._notifyOS('💰 Crypto Profit Banked: $sym', res.message));
+      unawaited(c._notifyOS('💰 Crypto Surge Banked: $sym', res.message));
       return;
     }
     if (stopOrder == null) {
@@ -258,7 +259,7 @@ class _CryptoGuardian {
     }
 
     final oq = double.tryParse('${stopOrder['qty']}') ?? 0.0;
-    if (oq > 0 && (p.qtyDouble - oq).abs() / p.qtyDouble > 0.002) {
+    if (oq > 0 && (targetQty - oq).abs() / targetQty > 0.01) {
       await ex.cancelOrderById('${stopOrder['id']}');
       c._log('🛡️ GUARDIAN $sym position size changed; re-placing stop', level: 'warn', notify: false);
       return;

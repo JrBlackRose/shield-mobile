@@ -111,7 +111,8 @@ int riskBudgetShares({required Pips equity, required Pips entry, required Pips s
 }
 
 int notionalCapShares({required Pips equity, required Pips entry}) {
-  return (equity * RiskRules.notionalCapBps) ~/ (kBpsDenom * entry);
+  final capBps = equity < 2500 * kPipsPerUsd ? 3500 : RiskRules.notionalCapBps;
+  return (equity * capBps) ~/ (kBpsDenom * entry);
 }
 
 Pips limitCollarPrice(Pips entry) =>
