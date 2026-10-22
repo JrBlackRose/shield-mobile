@@ -601,6 +601,14 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
           if ((o['symbol'] ?? '').toString().isNotEmpty)
             (o['symbol'] ?? '').toString().toUpperCase().replaceAll('/', '')
       };
+
+  Set<String> get queuedBuySymbols => {
+        for (final o in _rawOrders)
+          if ('${o['side'] ?? ''}'.toLowerCase() == 'buy' && (o['symbol'] ?? '').toString().isNotEmpty)
+            (o['symbol'] ?? '').toString().toUpperCase().replaceAll('/', '')
+      };
+
+  int get _activeSlotCount => {...heldSymbols, ...queuedBuySymbols}.length;
   bool sessionOpen = false;
   String sessionMessage = '';
   ExecMode executionMode = ExecMode.manual;
@@ -831,6 +839,11 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
 
   void _persistFeed() => _prefs.setString('sh_feed', jsonEncode(feed.map((e) => e.toJson()).toList()));
 
+  void _recordEntryTime(String sym, [DateTime? at]) {
+    _entryTimes[normSym(sym)] = (at ?? DateTime.now().toUtc()).toUtc();
+    _prefs.setString('sh_entries', jsonEncode({for (final e in _entryTimes.entries) e.key: e.value.toIso8601String()}));
+  }
+
   void _log(String msg, {String level = 'info', bool notify = true}) {
     feed.insert(0, FeedEvent(DateTime.now().toUtc(), msg, level));
     if (feed.length > kFeedMax) feed.removeRange(kFeedMax, feed.length);
@@ -901,7 +914,7 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
       _log('🔐 Connected to Alpaca PAPER (Key ..$keyTail) — ${executionMode.name.toUpperCase()} mode', level: 'ok');
       _startPolling();
       // Positions must be loaded before the first news scan so held tickers are known.
-      unawaited(refresh().then((_) => Future<void>.delayed(const Duration(seconds: 2), () => scanNews(force: true))));
+      unawaited(refresh().then((_) => Future<void>.delayed(const Duration(seconds: 2), () => scanNews())));
       notifyListeners();
       return null;
     } catch (e) {
@@ -1034,8 +1047,6 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
       }
     } catch (_) {}
   }
-
-  int get _activeSlotCount => {...heldSymbols, ...queuedSymbols}.length;
 
   int _recentStockDayTrades() {
     final cutoff = DateTime.now().toUtc().subtract(const Duration(days: 5));
@@ -1659,7 +1670,6 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
       }
 
       final token = _newToken();
-      if (cplan != null) _guardian.seed(TrailState.fromPlan(sym, cplan, DateTime.now().toUtc()));
       // AUTO fires only on a live-priced, unlocked, non-forced entry with >= 2/3 confluence.
       final auto = executionMode == ExecMode.auto &&
           !forceStage &&
@@ -1684,7 +1694,8 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
           clientOrderId: 'shield-$token',
         );
         final id = (order['id'] ?? '?').toString();
-        _entryTimes[sym] = DateTime.now().toUtc();
+        if (cplan != null) _guardian.seed(TrailState.fromPlan(sym, cplan, DateTime.now().toUtc()));
+        _recordEntryTime(sym);
         lastTradeResult = AutoExecuted(id, plan);
         _log(
             '🤖 AUTO ${tfLabel(timeframe)} $sym ${plan.qtyText} ≤ ${priceStr(plan.limitCollar)} [$source] → order ${id.length > 8 ? id.substring(0, 8) : id}',
@@ -1869,6 +1880,7 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
       );
       card.orderId = (order['id'] ?? '').toString();
       card.status = CardStatus.executed;
+      _recordEntryTime(card.ticker);
       final id = card.orderId!;
       _log(
           '✅ Approved ${card.ticker} $qtyText ≤ ${priceStr(card.limitCollar)} → order ${id.length > 8 ? id.substring(0, 8) : id}',
@@ -2829,7 +2841,7 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
   Future<void> sendChat(String text) => sendCopilotMessage(text);
   void clearChat() => clearCopilot();
   bool get newsLoading => newsScanInProgress;
-  Future<void> refreshNews() => scanNews(force: true);
+  Future<void> refreshNews() => scanNews();
   bool isClosing(String symbol) => _closing.contains(symbol.trim().toUpperCase());
 
   String? protectionSummary(String rawSymbol) {
@@ -3214,38 +3226,58 @@ class _NewsScorer {
         'Return raw JSON only: {"results":[{"id":"<id>","ticker":"SYM_OR_NONE","sentiment":0.0_to_1.0,"reason":"max 120 chars"}]}\n'
         'HEADLINES:\n$lines';
 
-    // Multi-model failover: a deprecated (404) or overloaded model falls through to the next one.
-    final models = kGeminiFallbackModels;
-
+    // Multi-model failover + live /v1beta/models auto-discovery on 404
+    final models = await GeminiClient.resolveModels(_http, _key);
     http.Response? res;
+    Object? lastErr;
+    var triedDiscovery = false;
+
     for (var i = 0; i < models.length; i++) {
       final m = models[i];
-      res = await _http
-          .post(
-            Uri.parse('https://generativelanguage.googleapis.com/v1beta/models/$m:generateContent'),
-            headers: {'x-goog-api-key': _key, 'Content-Type': 'application/json'},
-            body: jsonEncode({
-              'contents': [
-                {
-                  'parts': [
-                    {'text': prompt}
-                  ]
-                }
-              ],
-              'generationConfig': {'responseMimeType': 'application/json', 'temperature': 0.2},
-            }),
-          )
-          .timeout(_kV4Timeout);
-      if (res.statusCode == 200) break;
-
+      try {
+        res = await _http
+            .post(
+              Uri.parse('[https://generativelanguage.googleapis.com/v1beta/models/$m:generateContent](https://generativelanguage.googleapis.com/v1beta/models/$m:generateContent)'),
+              headers: {'x-goog-api-key': _key, 'Content-Type': 'application/json'},
+              body: jsonEncode({
+                'contents': [
+                  {
+                    'parts': [
+                      {'text': prompt}
+                    ]
+                  }
+                ],
+                'generationConfig': {'responseMimeType': 'application/json', 'temperature': 0.2},
+              }),
+            )
+            .timeout(_kV4Timeout);
+      } catch (e) {
+        lastErr = e;
+        if (i < models.length - 1) {
+          await Future<void>.delayed(Duration(milliseconds: 600 * (i + 1)));
+          continue;
+        }
+        rethrow;
+      }
+      if (res.statusCode == 200) {
+        GeminiClient.cachedWorkingModel = m;
+        break;
+      }
+      if (res.statusCode == 404 && !triedDiscovery) {
+        triedDiscovery = true;
+        final discovered = await GeminiClient.discoverActiveModel(_http, _key);
+        if (discovered != null && !models.contains(discovered)) {
+          models.add(discovered);
+        }
+      }
       if ((res.statusCode == 503 || res.statusCode == 429 || res.statusCode == 500 || res.statusCode == 404) &&
           i < models.length - 1) {
-        await Future<void>.delayed(Duration(milliseconds: 800 * (i + 1)));
+        await Future<void>.delayed(Duration(milliseconds: 600 * (i + 1)));
         continue;
       }
       break;
     }
-
+    if (res == null && lastErr != null) throw lastErr;
     if (res == null || res.statusCode != 200) {
       final code = res?.statusCode ?? 503;
       var msg = 'HTTP $code';

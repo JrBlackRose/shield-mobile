@@ -253,8 +253,8 @@ bool spreadAllowed(double spreadBps, Timeframe tf) => spreadBps <= maxSpreadBps(
 
 const int kPollSec = 5;
 const Duration kCardTtl = Duration(minutes: 5);
-const String kGeminiModel = 'gemini-2.5-flash';
-const List<String> kGeminiFallbackModels = ['gemini-2.5-flash', 'gemini-3.8-flash', 'gemini-2.5-flash-lite', 'gemini-2.5-pro'];
+const String kGeminiModel = 'gemini-3.0-flash';
+const List<String> kGeminiFallbackModels = ['gemini-3.0-flash', 'gemini-3.1-pro-preview', 'gemini-3.1-flash-lite-preview'];
 const int kFeedMax = 15;
 const String kPaperBase = 'https://paper-api.alpaca.markets/v2';
 const String kDataBase = 'https://data.alpaca.markets/v2';
@@ -1022,8 +1022,8 @@ class AlpacaClient {
 
   /// Crypto orders cannot use `day`; they must be `gtc` (or `ioc`).
   String _tif(String symbol, Timeframe timeframe) {
-  if (isCryptoSymbol(symbol)) return 'ioc';
-  return timeframe != Timeframe.intraday ? 'gtc' : 'day';
+  if (isCryptoSymbol(symbol)) return 'gtc';
+  return 'gtc';
 }
 
   /// Plain collared limit-buy entry (no bracket legs). Used for crypto, where
@@ -1133,36 +1133,110 @@ class GeminiClient {
     }
   }
 
+  static String? cachedWorkingModel;
+
+  static Future<List<String>> resolveModels(http.Client http, String key) async {
+    final base = <String>[
+      if (cachedWorkingModel != null) cachedWorkingModel!,
+      ...kGeminiFallbackModels,
+    ];
+    return base.toSet().toList();
+  }
+
+  static Future<String?> discoverActiveModel(http.Client http, String key) async {
+    try {
+      final res = await http
+          .get(
+            Uri.parse('https://generativelanguage.googleapis.com/v1beta/models'),
+            headers: {'x-goog-api-key': key, 'accept': 'application/json'},
+          )
+          .timeout(const Duration(seconds: 10));
+      if (res.statusCode != 200) return null;
+      final j = jsonDecode(res.body);
+      final list = j is Map ? j['models'] : null;
+      if (list is! List) return null;
+      final candidates = <String>[];
+      for (final m in list.whereType<Map>()) {
+        final name = '${m['name'] ?? ''}'.replaceFirst('models/', '');
+        final methods = m['supportedGenerationMethods'];
+        final supportsGen = methods is List && methods.map((e) => '$e').contains('generateContent');
+        if (!supportsGen || !name.startsWith('gemini-')) continue;
+        if (name.contains('embedding') || name.contains('imagen') || name.contains('veo') || name.contains('tts') || name.contains('audio')) continue;
+        candidates.add(name);
+      }
+      // Prefer flash/pro 3.x models first
+      candidates.sort((a, b) {
+        int score(String s) {
+          var v = 0;
+          if (s.contains('3.')) v += 100;
+          if (s.contains('flash') && !s.contains('lite')) v += 50;
+          if (s.contains('pro')) v += 30;
+          return -v;
+        }
+        return score(a).compareTo(score(b));
+      });
+      if (candidates.isNotEmpty) {
+        cachedWorkingModel = candidates.first;
+        return candidates.first;
+      }
+    } catch (_) {}
+    return null;
+  }
+
   Future<String> chatCopilot(String prompt) => _callGemini(prompt);
 
   Future<String> _callGemini(String promptText) async {
+    final models = await resolveModels(_http, _key);
     http.Response? res;
-    for (var i = 0; i < kGeminiFallbackModels.length; i++) {
-      final m = kGeminiFallbackModels[i];
-      res = await _http
-          .post(
-            Uri.parse('https://generativelanguage.googleapis.com/v1beta/models/$m:generateContent'),
-            headers: {'x-goog-api-key': _key, 'Content-Type': 'application/json'},
-            body: jsonEncode({
-              'contents': [
-                {
-                  'parts': [
-                    {'text': promptText}
-                  ]
-                }
-              ],
-              'generationConfig': {'responseMimeType': 'application/json'},
-            }),
-          )
-          .timeout(_kReadTimeout);
-      if (res.statusCode == 200) break;
+    Object? lastErr;
+    var triedDiscovery = false;
+
+    for (var i = 0; i < models.length; i++) {
+      final m = models[i];
+      try {
+        res = await _http
+            .post(
+              Uri.parse('https://generativelanguage.googleapis.com/v1beta/models/$m:generateContent'),
+              headers: {'x-goog-api-key': _key, 'Content-Type': 'application/json'},
+              body: jsonEncode({
+                'contents': [
+                  {
+                    'parts': [
+                      {'text': promptText}
+                    ]
+                  }
+                ],
+                'generationConfig': {'responseMimeType': 'application/json'},
+              }),
+            )
+            .timeout(_kReadTimeout);
+      } catch (e) {
+        lastErr = e;
+        if (i < models.length - 1) {
+          await Future<void>.delayed(Duration(milliseconds: 600 * (i + 1)));
+          continue;
+        }
+        rethrow;
+      }
+      if (res.statusCode == 200) {
+        GeminiClient.cachedWorkingModel = m;
+        break;
+      }
+      if (res.statusCode == 404 && !triedDiscovery) {
+        triedDiscovery = true;
+        final discovered = await discoverActiveModel(_http, _key);
+        if (discovered != null && !models.contains(discovered)) {
+          models.add(discovered);
+        }
+      }
       if ((res.statusCode == 503 || res.statusCode == 429 || res.statusCode == 500 || res.statusCode == 404) &&
-          i < kGeminiFallbackModels.length - 1) {
-        await Future<void>.delayed(Duration(milliseconds: 800 * (i + 1)));
+          i < models.length - 1) {
+        await Future<void>.delayed(Duration(milliseconds: 600 * (i + 1)));
         continue;
       }
       break;
     }
+    if (res == null && lastErr != null) throw lastErr;
     if (res == null || res.statusCode != 200) {
       final code = res?.statusCode ?? 503;
       var msg = 'HTTP $code';
