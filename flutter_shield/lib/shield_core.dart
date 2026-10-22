@@ -253,8 +253,8 @@ bool spreadAllowed(double spreadBps, Timeframe tf) => spreadBps <= maxSpreadBps(
 
 const int kPollSec = 5;
 const Duration kCardTtl = Duration(minutes: 5);
-const String kGeminiModel = 'gemini-3.0-flash';
-const List<String> kGeminiFallbackModels = ['gemini-3.0-flash', 'gemini-3.1-pro-preview', 'gemini-3.1-flash-lite-preview'];
+const String kGeminiModel = 'gemini-2.5-flash';
+const List<String> kGeminiFallbackModels = ['gemini-2.5-flash', 'gemini-3-flash-preview', 'gemini-2.5-flash-lite', 'gemini-3.1-pro-preview'];
 const int kFeedMax = 15;
 const String kPaperBase = 'https://paper-api.alpaca.markets/v2';
 const String kDataBase = 'https://data.alpaca.markets/v2';
@@ -1134,49 +1134,56 @@ class GeminiClient {
   }
 
   static String? cachedWorkingModel;
+  static List<String>? _discoveredModels;
+  static final Set<String> deadModels = <String>{};
 
   static Future<List<String>> resolveModels(http.Client http, String key) async {
-    final base = <String>[
-      if (cachedWorkingModel != null) cachedWorkingModel!,
+    if (_discoveredModels == null) {
+      await discoverActiveModel(http, key);
+    }
+    final out = <String>[
+      if (cachedWorkingModel != null && !deadModels.contains(cachedWorkingModel)) cachedWorkingModel!,
+      ...?_discoveredModels,
       ...kGeminiFallbackModels,
-    ];
-    return base.toSet().toList();
+    ].where((m) => m.isNotEmpty && !deadModels.contains(m)).toSet().toList();
+    return out.isEmpty ? kGeminiFallbackModels : out;
   }
 
   static Future<String?> discoverActiveModel(http.Client http, String key) async {
     try {
+      final uri = Uri.https('generativelanguage.googleapis.com', '/v1beta/models');
       final res = await http
-          .get(
-            Uri.parse('https://generativelanguage.googleapis.com/v1beta/models'),
-            headers: {'x-goog-api-key': key, 'accept': 'application/json'},
-          )
+          .get(uri, headers: {'x-goog-api-key': key, 'accept': 'application/json'})
           .timeout(const Duration(seconds: 10));
       if (res.statusCode != 200) return null;
       final j = jsonDecode(res.body);
       final list = j is Map ? j['models'] : null;
       if (list is! List) return null;
+      final skip = ['image', 'imagen', 'veo', 'tts', 'audio', 'embedding', 'aqa', 'robotics', 'computer', '2.0'];
       final candidates = <String>[];
       for (final m in list.whereType<Map>()) {
-        final name = '${m['name'] ?? ''}'.replaceFirst('models/', '');
+        final name = '${m['name'] ?? ''}'.replaceFirst('models/', '').trim();
         final methods = m['supportedGenerationMethods'];
         final supportsGen = methods is List && methods.map((e) => '$e').contains('generateContent');
-        if (!supportsGen || !name.startsWith('gemini-')) continue;
-        if (name.contains('embedding') || name.contains('imagen') || name.contains('veo') || name.contains('tts') || name.contains('audio')) continue;
+        if (!supportsGen || !name.startsWith('gemini-') || deadModels.contains(name)) continue;
+        if (skip.any((s) => name.contains(s))) continue;
         candidates.add(name);
       }
-      // Prefer flash/pro 3.x models first
       candidates.sort((a, b) {
-        int score(String s) {
+        int rank(String s) {
           var v = 0;
-          if (s.contains('3.')) v += 100;
-          if (s.contains('flash') && !s.contains('lite')) v += 50;
-          if (s.contains('pro')) v += 30;
+          if (s.contains('flash') && !s.contains('lite')) v += 100;
+          if (s.contains('flash-lite')) v += 80;
+          if (s.contains('3')) v += 25;
+          if (s.contains('2.5')) v += 20;
+          if (s.contains('pro')) v += 10;
           return -v;
         }
-        return score(a).compareTo(score(b));
+        return rank(a).compareTo(rank(b));
       });
       if (candidates.isNotEmpty) {
-        cachedWorkingModel = candidates.first;
+        _discoveredModels = candidates;
+        cachedWorkingModel ??= candidates.first;
         return candidates.first;
       }
     } catch (_) {}
@@ -1189,14 +1196,14 @@ class GeminiClient {
     final models = await resolveModels(_http, _key);
     http.Response? res;
     Object? lastErr;
-    var triedDiscovery = false;
 
     for (var i = 0; i < models.length; i++) {
-      final m = models[i];
+      final m = models[i].trim();
+      final uri = Uri.https('generativelanguage.googleapis.com', '/v1beta/models/$m:generateContent');
       try {
         res = await _http
             .post(
-              Uri.parse('https://generativelanguage.googleapis.com/v1beta/models/$m:generateContent'),
+              uri,
               headers: {'x-goog-api-key': _key, 'Content-Type': 'application/json'},
               body: jsonEncode({
                 'contents': [
@@ -1213,25 +1220,21 @@ class GeminiClient {
       } catch (e) {
         lastErr = e;
         if (i < models.length - 1) {
-          await Future<void>.delayed(Duration(milliseconds: 600 * (i + 1)));
+          await Future<void>.delayed(Duration(milliseconds: 500 * (i + 1)));
           continue;
         }
         rethrow;
       }
       if (res.statusCode == 200) {
-        GeminiClient.cachedWorkingModel = m;
+        cachedWorkingModel = m;
         break;
       }
-      if (res.statusCode == 404 && !triedDiscovery) {
-        triedDiscovery = true;
-        final discovered = await discoverActiveModel(_http, _key);
-        if (discovered != null && !models.contains(discovered)) {
-          models.add(discovered);
-        }
+      if (res.statusCode == 404) {
+        deadModels.add(m);
       }
       if ((res.statusCode == 503 || res.statusCode == 429 || res.statusCode == 500 || res.statusCode == 404) &&
           i < models.length - 1) {
-        await Future<void>.delayed(Duration(milliseconds: 600 * (i + 1)));
+        await Future<void>.delayed(Duration(milliseconds: 500 * (i + 1)));
         continue;
       }
       break;

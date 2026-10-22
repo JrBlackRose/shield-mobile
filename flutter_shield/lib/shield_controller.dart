@@ -3226,18 +3226,18 @@ class _NewsScorer {
         'Return raw JSON only: {"results":[{"id":"<id>","ticker":"SYM_OR_NONE","sentiment":0.0_to_1.0,"reason":"max 120 chars"}]}\n'
         'HEADLINES:\n$lines';
 
-    // Multi-model failover + live /v1beta/models auto-discovery on 404
+    // Multi-model failover using Uri.https() + automatic dead-model pruning
     final models = await GeminiClient.resolveModels(_http, _key);
     http.Response? res;
     Object? lastErr;
-    var triedDiscovery = false;
 
     for (var i = 0; i < models.length; i++) {
-      final m = models[i];
+      final m = models[i].trim();
+      final uri = Uri.https('generativelanguage.googleapis.com', '/v1beta/models/$m:generateContent');
       try {
         res = await _http
             .post(
-              Uri.parse('[https://generativelanguage.googleapis.com/v1beta/models/$m:generateContent](https://generativelanguage.googleapis.com/v1beta/models/$m:generateContent)'),
+              uri,
               headers: {'x-goog-api-key': _key, 'Content-Type': 'application/json'},
               body: jsonEncode({
                 'contents': [
@@ -3254,7 +3254,7 @@ class _NewsScorer {
       } catch (e) {
         lastErr = e;
         if (i < models.length - 1) {
-          await Future<void>.delayed(Duration(milliseconds: 600 * (i + 1)));
+          await Future<void>.delayed(Duration(milliseconds: 500 * (i + 1)));
           continue;
         }
         rethrow;
@@ -3263,16 +3263,12 @@ class _NewsScorer {
         GeminiClient.cachedWorkingModel = m;
         break;
       }
-      if (res.statusCode == 404 && !triedDiscovery) {
-        triedDiscovery = true;
-        final discovered = await GeminiClient.discoverActiveModel(_http, _key);
-        if (discovered != null && !models.contains(discovered)) {
-          models.add(discovered);
-        }
+      if (res.statusCode == 404) {
+        GeminiClient.deadModels.add(m);
       }
       if ((res.statusCode == 503 || res.statusCode == 429 || res.statusCode == 500 || res.statusCode == 404) &&
           i < models.length - 1) {
-        await Future<void>.delayed(Duration(milliseconds: 600 * (i + 1)));
+        await Future<void>.delayed(Duration(milliseconds: 500 * (i + 1)));
         continue;
       }
       break;
