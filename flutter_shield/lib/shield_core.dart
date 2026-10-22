@@ -25,7 +25,7 @@ enum CardStatus { pending, approving, executed, rejected, expired, stale, failed
 
 abstract final class RiskRules {
   static const int riskBudgetBps = 100;
-  static const int notionalCapBps = 1500;
+  static const int notionalCapBps = 1000;
   static const int collarBps = 15;
   static const int swingStopBps = 200;
   static const int swingTargetBps = 400;
@@ -253,12 +253,8 @@ bool spreadAllowed(double spreadBps, Timeframe tf) => spreadBps <= maxSpreadBps(
 
 const int kPollSec = 5;
 const Duration kCardTtl = Duration(minutes: 5);
-const String kGeminiModel = 'gemini-3.5-flash-lite';
-const List<String> kGeminiFallbackModels = [
-  'gemini-3.5-flash-lite',
-  'gemini-2.5-flash',
-  'gemini-2.0-flash',
-];
+const String kGeminiModel = 'gemini-2.5-flash';
+const List<String> kGeminiFallbackModels = ['gemini-2.5-flash', 'gemini-3.8-flash', 'gemini-2.5-flash-lite', 'gemini-2.5-pro'];
 const int kFeedMax = 15;
 const String kPaperBase = 'https://paper-api.alpaca.markets/v2';
 const String kDataBase = 'https://data.alpaca.markets/v2';

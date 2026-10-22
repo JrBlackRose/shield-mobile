@@ -103,7 +103,7 @@ abstract final class DataRules {
 }
 
 abstract final class UpdateRules {
-  static const String currentVersion = '4.7.0';
+  static const String currentVersion = '4.7.1';
   static const String versionUrl =
       'https://raw.githubusercontent.com/JrBlackRose/shield-mobile/main/version.json';
   static const Duration minInterval = Duration(hours: 6);
@@ -400,6 +400,26 @@ class ClosedTrade {
   final double pnlPct;
   final DateTime closedAt;
   bool get isWin => pnlPips >= 0;
+
+  Map<String, dynamic> toJson() => {
+        's': symbol,
+        'q': qtyText,
+        'b': buyPrice,
+        'sl': sellPrice,
+        'p': pnlPips,
+        'pct': pnlPct,
+        't': closedAt.toIso8601String(),
+      };
+
+  factory ClosedTrade.fromJson(Map<String, dynamic> j) => ClosedTrade(
+        symbol: '${j['s'] ?? ''}',
+        qtyText: '${j['q'] ?? '0'}',
+        buyPrice: (j['b'] as num?)?.toInt() ?? 0,
+        sellPrice: (j['sl'] as num?)?.toInt() ?? 0,
+        pnlPips: (j['p'] as num?)?.toInt() ?? 0,
+        pnlPct: (j['pct'] as num?)?.toDouble() ?? 0.0,
+        closedAt: DateTime.tryParse('${j['t']}')?.toUtc() ?? DateTime.now().toUtc(),
+      );
 }
 
 class CopilotReply {
@@ -513,7 +533,17 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
   ShieldController(this._prefs, this.watchLink);
   final SharedPreferences _prefs;
   final PreviewWatchLink watchLink;
-  final http.Client _http = http.Client();
+  http.Client _http = http.Client();
+
+  void _resetHttpClient() {
+    try {
+      _http.close();
+    } catch (_) {}
+    _http = http.Client();
+    if (vault.hasRequired) {
+      client = AlpacaClient(_http, vault.alpacaKey, vault.alpacaSecret);
+    }
+  }
   AlpacaClient? client;
   void Function(String msg, bool error)? onMessage;
 
@@ -677,6 +707,13 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
     );
     executionMode = p.getString('sh_mode') == 'auto' ? ExecMode.auto : ExecMode.manual;
     proMode = p.getBool('sh_pro') ?? false;
+    try {
+      closedTrades = (jsonDecode(p.getString('sh_closed') ?? '[]') as List)
+          .map((e) => ClosedTrade.fromJson((e as Map).cast<String, dynamic>()))
+          .toList();
+    } catch (_) {
+      closedTrades = [];
+    }
     try {
       feed = (jsonDecode(p.getString('sh_feed') ?? '[]') as List)
           .map((e) => FeedEvent.fromJson((e as Map).cast<String, dynamic>()))
@@ -864,7 +901,7 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
       _log('🔐 Connected to Alpaca PAPER (Key ..$keyTail) — ${executionMode.name.toUpperCase()} mode', level: 'ok');
       _startPolling();
       // Positions must be loaded before the first news scan so held tickers are known.
-      unawaited(refresh().then((_) => scanNews(force: true)));
+      unawaited(refresh().then((_) => Future<void>.delayed(const Duration(seconds: 2), () => scanNews(force: true))));
       notifyListeners();
       return null;
     } catch (e) {
@@ -988,8 +1025,13 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
     final cl = client;
     if (cl == null || vaultStatus != VaultStatus.valid) return;
     try {
-      final raw = await _extras().closedOrders(limit: 120);
-      closedTrades = _buildClosedTrades(raw, positions);
+      final raw = await _extras().closedOrders(limit: 60);
+      final built = _buildClosedTrades(raw, positions);
+      if (built.isNotEmpty || closedTrades.isEmpty) {
+        closedTrades = built;
+        _prefs.setString('sh_closed', jsonEncode(closedTrades.take(40).map((t) => t.toJson()).toList()));
+        notifyListeners();
+      }
     } catch (_) {}
   }
 
@@ -1126,7 +1168,22 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
     if (_polling || cl == null || vaultStatus != VaultStatus.valid) return;
     _polling = true;
     try {
-      final fa = cl.getAccount(), fp = cl.getPositions(), fo = cl.getOpenOrders(), fc = cl.getClock();
+      Future<T> retryCall<T>(Future<T> Function(AlpacaClient c) fn) async {
+        try {
+          return await fn(client!);
+        } catch (e) {
+          if (_isNetwork(e)) {
+            _resetHttpClient();
+            await Future<void>.delayed(const Duration(milliseconds: 400));
+            return await fn(client!);
+          }
+          rethrow;
+        }
+      }
+      final fa = retryCall((c) => c.getAccount());
+      final fp = retryCall((c) => c.getPositions());
+      final fo = retryCall((c) => c.getOpenOrders());
+      final fc = retryCall((c) => c.getClock());
       await Future.wait<Object?>([fa, fp, fo, fc]);
       account = Account.fromJson(await fa);
       // Filter out < $1.50 dust using notional value so micro-BTC positions (0.00009975 BTC) stay protected
@@ -2282,7 +2339,7 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
     final sym = _cleanSym(ticker);
     if (sym == null) return;
     if (executionMode != ExecMode.auto || autoLockReason != null || tradeSubmitting) return;
-    if (positions.length >= AutoRules.maxAutoPositions) return;
+    if (_activeSlotCount >= AutoRules.maxAutoPositions) return;
     _agentTried[sym] = DateTime.now().toUtc();
     _log('🤖 Auto AI News: $sym bullish ${sentiment.toStringAsFixed(2)} — evaluating live AUTO entry',
         level: 'info', notify: false);
@@ -2931,7 +2988,20 @@ class _AlpacaExtras {
   List<Map<String, dynamic>> _list(dynamic b) =>
       b is List ? b.whereType<Map>().map((e) => e.cast<String, dynamic>()).toList() : <Map<String, dynamic>>[];
 
-  Future<dynamic> _get(Uri u) async => _decode(await _http.get(u, headers: _h).timeout(_kV4Timeout));
+  Future<dynamic> _get(Uri u) async {
+    for (var attempt = 0; attempt < 2; attempt++) {
+      try {
+        return _decode(await _http.get(u, headers: _h).timeout(_kV4Timeout));
+      } catch (e) {
+        final isNet = e is TimeoutException || e is SocketException || e is http.ClientException;
+        if (isNet && attempt == 0) {
+          await Future<void>.delayed(const Duration(milliseconds: 450));
+          continue;
+        }
+        rethrow;
+      }
+    }
+  }
 
   Future<dynamic> _delete(String url) async =>
       _decode(await _http.delete(Uri.parse(url), headers: _h).timeout(_kV4Timeout));

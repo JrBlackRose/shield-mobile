@@ -340,7 +340,7 @@ class _ShieldHomeState extends State<ShieldHome> {
     return Scaffold(
       appBar: AppBar(
         titleSpacing: 12,
-        title: const Text('🛡️ SHIELD v4.6', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 17)),
+        title: const Text('🛡️ SHIELD v4.7', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 17)),
         actions: [
           if (c.updateAvailable)
             IconButton(
