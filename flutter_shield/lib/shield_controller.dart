@@ -1015,8 +1015,6 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
     return (wd != DateTime.sunday && soon) ? VenueKind.overnight : VenueKind.closed; // 00:00-04:00 ET
   }
 
-  bool _tradableNow(String sym) => _resolveVenue(sym) != VenueKind.closed;
-
   /// Returns true when crypto should be paused (first 45m of US open whipsaw or >30% crypto allocation during US session).
   bool _cryptoBlockedBySession(DateTime nowUtc) {
     final eq = account?.equity ?? 0;
@@ -1038,11 +1036,16 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
     final cl = client;
     if (cl == null || vaultStatus != VaultStatus.valid) return;
     try {
-      final raw = await _extras().closedOrders(limit: 60);
+      final raw = await _extras().closedOrders(limit: 200);
       final built = _buildClosedTrades(raw, positions);
-      if (built.isNotEmpty || closedTrades.isEmpty) {
-        closedTrades = built;
-        _prefs.setString('sh_closed', jsonEncode(closedTrades.take(40).map((t) => t.toJson()).toList()));
+      if (built.isNotEmpty) {
+        final byKey = <String, ClosedTrade>{
+          for (final t in closedTrades) '${t.symbol}_${t.closedAt.millisecondsSinceEpoch ~/ 1000}': t,
+          for (final t in built) '${t.symbol}_${t.closedAt.millisecondsSinceEpoch ~/ 1000}': t,
+        };
+        final merged = byKey.values.toList()..sort((a, b) => b.closedAt.compareTo(a.closedAt));
+        closedTrades = merged.take(60).toList();
+        _prefs.setString('sh_closed', jsonEncode(closedTrades.map((t) => t.toJson()).toList()));
         notifyListeners();
       }
     } catch (_) {}
@@ -1314,7 +1317,8 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
       if (isCryptoSymbol(s)) {
         if (!blockCrypto) cryptos.add(s);
       } else {
-        stocks.add(s);
+        // Never feed US stocks to the Autonomous Scout when the regular US session is closed
+        if (sessionOpen && intradayWindowMessage(nowUtc) == null) stocks.add(s);
       }
     }
 
@@ -1444,14 +1448,16 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
     if (isCryptoSymbol(sym)) return;
     final clock = await client!.getClock();
     _applyClock(clock);
-    if (sessionOpen) {
-      if (tf == Timeframe.intraday) {
-        final ts = DateTime.tryParse('${clock['timestamp']}')?.toUtc() ?? DateTime.now().toUtc();
-        final m = intradayWindowMessage(ts);
-        if (m != null) throw RiskReject(m);
+    if (tf == Timeframe.intraday) {
+      if (!sessionOpen) {
+        throw const RiskReject('US stock market is closed for intraday trading. Auto-trading 24/7 Crypto only.');
       }
+      final ts = DateTime.tryParse('${clock['timestamp']}')?.toUtc() ?? DateTime.now().toUtc();
+      final m = intradayWindowMessage(ts);
+      if (m != null) throw RiskReject(m);
       return;
     }
+    if (sessionOpen) return;
     if (_resolveVenue(sym) == VenueKind.closed) {
       throw const RiskReject('US stock market is closed (Alpaca clock). Crypto trades 24/7 — '
           'or turn on Off-Hours Staging to stage a MANUAL stock card.');
@@ -2334,7 +2340,7 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
           !isQueued &&
           r.sentiment >= AutoRules.newsBuySentiment &&
           nowUtc.difference(n.createdAt) <= AutoRules.newsFreshness &&
-          _tradableNow(r.ticker) &&
+          (isCryptoSymbol(r.ticker) ? !_cryptoBlockedBySession(nowUtc) : (sessionOpen && intradayWindowMessage(nowUtc) == null)) &&
           !_agentCooling(r.ticker.toUpperCase(), nowUtc)) {
         final b = bestBuy;
         if (b == null || r.sentiment > b.sentiment) bestBuy = r;
