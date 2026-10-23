@@ -1,5 +1,5 @@
 // ============================================================================
-// PROJECT SHIELD v4.7 — lib/main.dart  (UI shell only)
+// PROJECT SHIELD v4.8 — lib/main.dart  (UI shell only)
 //
 // Imports the pure core and the controller:
 //   shield_core.dart        risk math, formatting, models, watch-link types
@@ -340,7 +340,7 @@ class _ShieldHomeState extends State<ShieldHome> {
     return Scaffold(
       appBar: AppBar(
         titleSpacing: 12,
-        title: const Text('🛡️ SHIELD v4.7', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 17)),
+        title: const Text('🛡️ SHIELD v4.8', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 17)),
         actions: [
           if (c.updateAvailable)
             IconButton(
@@ -2242,7 +2242,7 @@ class _PositionRow extends StatelessWidget {
                   : 'Entry ${usd(p.avgEntry)} · Now ${usd(p.currentPrice)}',
               style: _mono.copyWith(fontSize: 11.5, color: Pal.muted),
             ),
-            if (c.proMode && prot != null)
+            if (prot != null)
               Padding(
                 padding: const EdgeInsets.only(top: 3),
                 child: Text(prot, style: _mono.copyWith(fontSize: 11, color: Pal.sky)),

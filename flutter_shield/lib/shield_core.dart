@@ -1250,8 +1250,21 @@ class GeminiClient {
     }
     try {
       final outer = jsonDecode(res.body) as Map<String, dynamic>;
-      var text = (outer['candidates'][0]['content']['parts'][0]['text'] as String).trim();
-      if (text.startsWith('```')) text = text.replaceAll(RegExp(r'^```(?:json)?|```$'), '').trim();
+      final parts = (outer['candidates'] as List).first['content']['parts'] as List;
+      final buf = StringBuffer();
+      for (final p in parts.whereType<Map>()) {
+        if (p['thought'] == true) continue;
+        if (p['text'] is String) buf.write(p['text']);
+      }
+      var text = buf.toString().trim();
+      if (text.isEmpty && parts.isNotEmpty && parts.last is Map) {
+        text = '${(parts.last as Map)['text'] ?? ''}'.trim();
+      }
+      final startObj = text.indexOf('{');
+      final endObj = text.lastIndexOf('}');
+      if (startObj != -1 && endObj > startObj) {
+        text = text.substring(startObj, endObj + 1);
+      }
       return text;
     } catch (_) {
       throw const PlanAbort('Gemini returned a malformed response.');

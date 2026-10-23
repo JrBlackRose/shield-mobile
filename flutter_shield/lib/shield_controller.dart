@@ -103,7 +103,7 @@ abstract final class DataRules {
 }
 
 abstract final class UpdateRules {
-  static const String currentVersion = '4.7.1';
+  static const String currentVersion = '4.8.0';
   static const String versionUrl =
       'https://raw.githubusercontent.com/JrBlackRose/shield-mobile/main/version.json';
   static const Duration minInterval = Duration(hours: 6);
@@ -222,10 +222,29 @@ ConfluenceScore? computeConfluence({
     if (session.isEmpty) session = done.where((c) => _nyDayKey(c.t) == day).toList();
   }
 
+  final closes = done.map((c) => c.c).toList();
+  double ema(List<double> vals, int period) {
+    final k = 2.0 / (period + 1);
+    var e = vals.first;
+    for (var i = 1; i < vals.length; i++) {
+      e = vals[i] * k + e * (1.0 - k);
+    }
+    return e;
+  }
+  final ema9 = ema(closes, 9);
+  final ema21 = ema(closes, 21);
+  final range = last.h - last.l;
+  final strongClose = range <= 0 ? true : ((last.c - last.l) / range) >= 0.45;
+  final trendAligned = ema9 >= ema21 && price >= ema9 && strongClose;
+
   final vwap = sessionVwap(session);
   final vr = volumeRatio(done.map((c) => c.v).toList(), avgBars: ConfluenceRules.volAvgBars);
-  final rsi = wilderRsi(done.map((c) => c.c).toList(), period: ConfluenceRules.rsiPeriod);
+  var rsi = wilderRsi(closes, period: ConfluenceRules.rsiPeriod);
   if (vwap == null || vr == null || rsi == null) return null;
+  // Penalize RSI score if EMA9 < EMA21 downtrend or weak rejection wick
+  if (!trendAligned && rsi >= 50.0 && rsi < 70.0) {
+    rsi = 44.0;
+  }
   return ConfluenceScore(
     symbol: symbol,
     price: price,
@@ -3219,7 +3238,7 @@ class _NewsScorer {
   Future<List<_Scored>> score(List<NewsHeadline> items, Set<String> held) async {
     final lines = StringBuffer();
     for (final n in items) {
-      lines.writeln('id=${n.id} symbols=[${n.symbols.join(',')}] headline="${_oneLine(n.headline, 220)}"');
+      lines.writeln('id=${n.id} symbols=[${n.symbols.join(',')}] headline="${_oneLine(n.headline.replaceAll('"', "'"), 220)}"');
     }
     final prompt = 'You are the news-risk engine of a US-equities and crypto PAPER trading cockpit.\n'
         'HELD_TICKERS: ${held.isEmpty ? 'none' : held.join(', ')}\n'
@@ -3290,7 +3309,22 @@ class _NewsScorer {
     }
     try {
       final outer = jsonDecode(res.body) as Map<String, dynamic>;
-      final text = _stripFence(outer['candidates'][0]['content']['parts'][0]['text'] as String);
+      final parts = (outer['candidates'] as List).first['content']['parts'] as List;
+      final buf = StringBuffer();
+      for (final p in parts.whereType<Map>()) {
+        if (p['thought'] == true) continue;
+        if (p['text'] is String) buf.write(p['text']);
+      }
+      var text = _stripFence(buf.toString());
+      final sObj = text.indexOf('{');
+      final eObj = text.lastIndexOf('}');
+      final sArr = text.indexOf('[');
+      final eArr = text.lastIndexOf(']');
+      if (sObj != -1 && eObj > sObj && (sArr == -1 || sObj < sArr)) {
+        text = text.substring(sObj, eObj + 1);
+      } else if (sArr != -1 && eArr > sArr) {
+        text = text.substring(sArr, eArr + 1);
+      }
       final decoded = jsonDecode(text);
       final list = decoded is Map ? decoded['results'] : decoded;
       if (list is! List) throw const FormatException('no results array');
