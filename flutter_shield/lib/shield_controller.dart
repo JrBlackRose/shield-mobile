@@ -638,6 +638,7 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
   bool allowOffHoursStaging = false, tradeSubmitting = false, scanInProgress = false;
   bool proMode = false;
   final Map<String, DateTime> _entryTimes = <String, DateTime>{};
+  final Map<String, int> _stockPeakBps = <String, int>{};
 
   void toggleProMode() {
     proMode = !proMode;
@@ -1141,7 +1142,7 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
       if ((st == 'filled' || st == 'partially_filled') && fq > 0 && fp != null && fp > 0 && sym != null && at != null) {
         fills.add((sym: sym, side: side, qty: fq, price: fp, at: at));
       }
-      final legs = o['legs'];
+      final legs = normSym('${o['symbol'] ?? ''}') == sym ? o['legs'] : null;
       if (legs is List) {
         for (final l in legs.whereType<Map>()) {
           extract(l.cast<String, dynamic>());
