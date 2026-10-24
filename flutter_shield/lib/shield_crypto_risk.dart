@@ -38,14 +38,14 @@ abstract final class CryptoRules {
   static const int makerFeeBps = 15;
 
   // Trailing.
-  static const double breakevenAtR = 0.65;
-  static const int breakevenLockBps = 65; // > buy fee 25 + sell fee 25 + cushion
-  static const double trailStartR = 1.0;
-  static const double trailKStart = 1.5; // tighter chandelier trail
-  static const double trailKMin = 0.85;
+  static const double breakevenAtR = 1.00; // Wait for 1.0R before locking break-even
+  static const int breakevenLockBps = 75; // 50 bps fees + 25 bps net cushion
+  static const double trailStartR = 1.35; // Start chandelier trail at 1.35R
+  static const double trailKStart = 1.6;
+  static const double trailKMin = 0.90;
   static const double minStepAtrFrac = 0.18;
-  static const int minStopGapBps = 10;
-  static const double refTargetR = 2.2; // positive expectancy R target
+  static const int minStopGapBps = 45; // Keep stop at least 45 bps below live price
+  static const double refTargetR = 2.2; // Positive expectancy R target
 }
 
 double? wilderAtr(List<CryptoBar> bars, {int period = 14}) {

@@ -103,7 +103,7 @@ abstract final class DataRules {
 }
 
 abstract final class UpdateRules {
-  static const String currentVersion = '4.9.0';
+  static const String currentVersion = '5.0.0';
   static const String versionUrl =
       'https://raw.githubusercontent.com/JrBlackRose/shield-mobile/main/version.json';
   static const Duration minInterval = Duration(hours: 6);
@@ -234,30 +234,25 @@ ConfluenceScore? computeConfluence({
   final ema9 = ema(closes, 9);
   final ema21 = ema(closes, 21);
   final range = last.h - last.l;
-  // PULLBACK SNIPER LOGIC: Look for a lower wick (hammer) showing buyers defending the dip
   final bodyBottom = math.min(last.o, last.c);
   final lowerWick = bodyBottom - last.l;
-  final isDipRejection = range <= 0 ? true : (lowerWick / range) >= 0.35; // 35% lower wick
-
-  // Support proximity: price should be resting near the EMA9/21, not flying away from it
-  final distFromEma = (price - math.max(ema9, ema21)).abs() / price;
-  final nearSupport = distFromEma < 0.0035; // Within 0.35% of moving average
-
-  final trendAligned = ema9 >= ema21 && price >= ema21 && isDipRejection && nearSupport;
+  final bounceCandle = range > 0 && (last.c >= last.o || (lowerWick / range) >= 0.25);
+  final notOverextended = ((price - ema9) / price) <= 0.0060; // Within 0.60% above EMA9, not chasing a spike
+  final trendAligned = ema9 >= ema21 && price >= ema21 * 0.997 && bounceCandle && notOverextended;
 
   final vwap = sessionVwap(session);
   final vr = volumeRatio(done.map((c) => c.v).toList(), avgBars: ConfluenceRules.volAvgBars);
   var rsi = wilderRsi(closes, period: ConfluenceRules.rsiPeriod);
   if (vwap == null || vr == null || rsi == null) return null;
 
-  // Penalize RSI if it's not a valid pullback to support
-  if (!trendAligned && rsi >= 45.0 && rsi <= 60.0) {
-    rsi = 40.0; // Force it out of the constructive band
+  if (!trendAligned) {
+    // Hard gate: force < 2/3 points so breakout spikes with VWAP + Volume cannot sneak past triggerTrade
+    rsi = 38.0;
   }
   return ConfluenceScore(
     symbol: symbol,
     price: price,
-    vwapValue: vwap,
+    vwapValue: trendAligned ? vwap : price * 1.01,
     volumeRatio: vr,
     rsiValue: rsi,
     barsUsed: done.length,
@@ -1093,9 +1088,10 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
     if (!sessionOpen) return;
     final n = nyTime(DateTime.now().toUtc());
     final m = n.hour * 60 + n.minute;
-    final isEodWindow = m >= 954 && m < 960; // 15:54 - 15:59 ET: flatten expiring DAY brackets
+    final isEodWindow = m >= 954 && m < 960; // 15:54 - 15:59 ET
 
     final openSyms = <String>{};
+    var peaksChanged = false;
     final snapshot = List<Position>.of(positions);
     for (final p in snapshot) {
       if (isCryptoSymbol(p.symbol) || !p.isLong || p.avgEntry <= 0) continue;
@@ -1106,21 +1102,24 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
       final gainBps = ((p.currentPrice - p.avgEntry) * kBpsDenom) ~/ p.avgEntry;
       final prevPeak = _stockPeakBps[sym] ?? gainBps;
       final peakBps = gainBps > prevPeak ? gainBps : prevPeak;
-      _stockPeakBps[sym] = peakBps;
+      if (_stockPeakBps[sym] != peakBps) {
+        _stockPeakBps[sym] = peakBps;
+        peaksChanged = true;
+      }
 
-      var hasActiveSell = false;
+      var hasActiveStop = false;
       var hasExpiringDayLeg = false;
       for (final o in _rawOrders) {
         final st = '${o['status'] ?? ''}'.toLowerCase();
         if (st == 'canceled' || st == 'expired' || st == 'rejected') continue;
         if (normSym('${o['symbol'] ?? ''}') == sym && '${o['side']}' == 'sell') {
-          hasActiveSell = true;
+          if (tryPips(o['stop_price']) != null) hasActiveStop = true;
           if ('${o['time_in_force'] ?? ''}'.toLowerCase() == 'day') hasExpiringDayLeg = true;
         }
       }
 
-      if (isEodWindow && (hasExpiringDayLeg || !hasActiveSell)) {
-        _log('🕒 EOD Flatten: closing intraday stock $sym before 16:00 ET close', level: 'warn');
+      if (isEodWindow && hasExpiringDayLeg) {
+        _log('🕒 EOD Flatten: closing expiring DAY stock $sym before 16:00 ET close', level: 'warn');
         final res = await closePosition(sym);
         unawaited(_notifyOS('🕒 EOD Flatten: $sym', res.message));
         continue;
@@ -1128,29 +1127,35 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
 
       if (executionMode != ExecMode.auto) continue;
 
-      // 1. Peak-Profit Trail Ratchet: if a stock reached >= +1.15% (115 bps) and pulls back 45 bps from peak, lock in profit!
-      final trailTriggered = peakBps >= 115 && gainBps >= 40 && (peakBps - gainBps) >= 45;
-      if (trailTriggered) {
-        _log('🔒 Peak-Profit Ratchet triggered on $sym (peak +${(peakBps / 100.0).toStringAsFixed(2)}% → locking +${(gainBps / 100.0).toStringAsFixed(2)}%)', level: 'ok');
+      // Stage 1 (Break-Even Shield): If stock reached >= +1.00% (100 bps) and drops back to <= +0.20% (20 bps), exit at break-even so a 1%+ winner never turns into a -1.50% loss!
+      final breakEvenShield = peakBps >= 100 && gainBps <= 20;
+      // Stage 2 (Runner Trail): Once stock reaches >= +1.80% (180 bps), trail by 35 bps (locks >= +1.45% to +2.40%+)
+      final runnerTrail = peakBps >= 180 && (peakBps - gainBps) >= 35;
+
+      if (runnerTrail || breakEvenShield) {
+        final label = runnerTrail ? '🔒 Runner Profit Trail' : '🛡️ Break-Even Shield';
+        _log('$label triggered on $sym (peak +${(peakBps / 100.0).toStringAsFixed(2)}% → exited at ${gainBps >= 0 ? "+" : ""}${(gainBps / 100.0).toStringAsFixed(2)}%)', level: 'ok');
         final res = await closePosition(sym);
-        unawaited(_notifyOS('🔒 Profit Ratchet Locked: $sym', res.message));
+        unawaited(_notifyOS('$label: $sym', res.message));
         continue;
       }
 
-      // 2. Unprotected Stock Guardian Backstop (if bracket legs are missing)
-      if (!hasActiveSell) {
-        if (gainBps <= -150) {
-          _log('🛡️ Stock Guardian stop-loss triggered on unprotected $sym (${(gainBps / 100.0).toStringAsFixed(2)}%)', level: 'error');
-          final res = await closePosition(sym);
-          unawaited(_notifyOS('🛡️ Unprotected Stock Stop: $sym', res.message));
-        } else if (gainBps >= 220) {
-          _log('💰 Stock Guardian banking +${(gainBps / 100.0).toStringAsFixed(2)}% on unprotected $sym', level: 'ok');
-          final res = await closePosition(sym);
-          unawaited(_notifyOS('💰 Stock Profit Banked: $sym', res.message));
-        }
+      // Software Stop-Loss & Target Backstop (always enforces -1.50% stop even if Alpaca OCO stop leg is in 'held' state)
+      if (gainBps <= -150) {
+        _log('🛡️ Stock Guardian stop-loss triggered on $sym (${(gainBps / 100.0).toStringAsFixed(2)}%)', level: 'error');
+        final res = await closePosition(sym);
+        unawaited(_notifyOS('🛡️ Stock Stop-Loss: $sym', res.message));
+      } else if (!hasActiveStop && gainBps >= 240) {
+        _log('💰 Stock Guardian banking +${(gainBps / 100.0).toStringAsFixed(2)}% target on $sym', level: 'ok');
+        final res = await closePosition(sym);
+        unawaited(_notifyOS('💰 Stock Profit Banked: $sym', res.message));
       }
     }
+    final beforeLen = _stockPeakBps.length;
     _stockPeakBps.removeWhere((k, _) => !openSyms.contains(k));
+    if (peaksChanged || _stockPeakBps.length != beforeLen) {
+      _prefs.setString('sh_peaks', jsonEncode(_stockPeakBps));
+    }
   }
 
   // ==========================================================================
@@ -2917,6 +2922,20 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
         for (final l in legs.whereType<Map>()) {
           tp ??= tryPips(l['limit_price']);
           sl ??= tryPips(l['stop_price']);
+        }
+      }
+    }
+    if (!isCryptoSymbol(sym)) {
+      final pos = _positionFor(sym);
+      if (pos != null && pos.avgEntry > 0) {
+        tp ??= roundToTick(pos.avgEntry * (kBpsDenom + RiskRules.intradayTargetBps) ~/ kBpsDenom);
+        final peak = _stockPeakBps[sym] ?? 0;
+        if (peak >= 180) {
+          sl = roundToTick(pos.avgEntry * (kBpsDenom + (peak - 35)) ~/ kBpsDenom);
+        } else if (peak >= 100) {
+          sl = roundToTick(pos.avgEntry * (kBpsDenom + 20) ~/ kBpsDenom);
+        } else {
+          sl ??= roundToTick(pos.avgEntry * (kBpsDenom - RiskRules.intradayStopBps) ~/ kBpsDenom);
         }
       }
     }

@@ -248,7 +248,7 @@ MicroQuote calcImbalanceAndMicro(double bidP, double askP, double bidS, double a
   return (mid: mid, micro: mid + 0.5 * imb * spread, imbalance: imb, spreadBps: spreadBps);
 }
 
-double maxSpreadBps(Timeframe tf) => tf == Timeframe.intraday ? 45.0 : 80.0;
+double maxSpreadBps(Timeframe tf) => tf == Timeframe.intraday ? 22.0 : 55.0;
 bool spreadAllowed(double spreadBps, Timeframe tf) => spreadBps <= maxSpreadBps(tf);
 
 const int kPollSec = 5;
@@ -586,7 +586,9 @@ class FeedEvent {
 
   /// 'trade' | 'risk' | 'guard' | 'ai' | 'system'
   String get category {
-    if (_has(const ['Approved', 'AUTO', 'Staged', 'Order'])) return 'trade';
+    if (_has(const ['Connected to', 'Disconnected', 'Mode →'])) return 'system';
+    if (_has(const ['Scout', 'Autonomous Scout'])) return 'ai';
+    if (_has(const ['Approved', 'AUTO', 'Staged', 'Order', 'Profit', 'Ratchet'])) return 'trade';
     if (_has(const ['RISK', 'DEFENSE', 'KILL', '⛔', '🚨', '❌'])) return 'risk';
     if (_has(const ['GUARDIAN', '🛡', 'collar'])) return 'guard';
     if (_aiWord.hasMatch(message) || _has(const ['Scout', 'Copilot', '🤖', '🧭', '🧠'])) return 'ai';

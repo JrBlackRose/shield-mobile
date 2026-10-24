@@ -254,7 +254,7 @@ class _CryptoGuardian {
     }
 
     final status = '${stopOrder['status']}'.toLowerCase();
-    if (status == 'accepted' || status == 'pending_new' || status == 'pending_replace') {
+    if (status == 'pending_new' || status == 'pending_replace') {
       return;
     }
 
@@ -340,15 +340,38 @@ ConfluenceScore? computeCryptoConfluence({
   final window = done.length > 288 ? done.sublist(done.length - 288) : done;
   final vwap = sessionVwap(window);
   final vols = done.map((b) => b.v).toList();
+  final closes = done.map((b) => b.c).toList();
   final prior = vols.sublist(vols.length - 49, vols.length - 1)..sort();
   final med = (prior[23] + prior[24]) / 2.0;
   final vr = med > 0 ? vols.last / med : null;
-  final rsi = wilderRsi(done.map((b) => b.c).toList(), period: ConfluenceRules.rsiPeriod);
+  var rsi = wilderRsi(closes, period: ConfluenceRules.rsiPeriod);
   if (vwap == null || vr == null || rsi == null) return null;
+
+  double ema(List<double> vals, int period) {
+    final k = 2.0 / (period + 1);
+    var e = vals.first;
+    for (var i = 1; i < vals.length; i++) {
+      e = vals[i] * k + e * (1.0 - k);
+    }
+    return e;
+  }
+  final ema9 = ema(closes, 9);
+  final ema21 = ema(closes, 21);
+  final last = done.last;
+  final range = last.h - last.l;
+  final lowerWick = math.min(last.o, last.c) - last.l;
+  final bounceCandle = range > 0 && (last.c >= last.o || (lowerWick / range) >= 0.25);
+  final notOverextended = ((price - ema9) / price) <= 0.0065; // Not >0.65% extended above EMA9
+  final trendAligned = ema9 >= ema21 && price >= ema21 * 0.997 && bounceCandle && notOverextended;
+
+  if (!trendAligned) {
+    // Hard gate: force < 2 points so non-pullback spikes NEVER pass triggerTrade
+    rsi = 38.0;
+  }
   return ConfluenceScore(
     symbol: symbol,
     price: price,
-    vwapValue: vwap,
+    vwapValue: trendAligned ? vwap : price * 1.01,
     volumeRatio: vr,
     rsiValue: rsi,
     barsUsed: done.length,
