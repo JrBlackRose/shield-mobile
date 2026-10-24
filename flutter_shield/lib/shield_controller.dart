@@ -1457,7 +1457,10 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
       final raw = await _coreChat(_scoutPrompt(nowUtc, candidates));
       _lastAgentError = null;
       final pick = _parseScoutPick(raw, candidates.toSet());
-      if (pick == null) return; // no high-conviction setup this round
+      if (pick == null) {
+        _log('🔍 Scout scanned ${candidates.length} live pairs — no pullback setup met entry criteria.', level: 'info', notify: false);
+        return;
+      }
       if (executionMode != ExecMode.auto || autoLockReason != null || tradeSubmitting) return;
     if (_activeSlotCount >= AutoRules.maxAutoPositions) return;
       _agentTried[pick] = DateTime.now().toUtc();
