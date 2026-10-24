@@ -103,7 +103,7 @@ abstract final class DataRules {
 }
 
 abstract final class UpdateRules {
-  static const String currentVersion = '4.8.0';
+  static const String currentVersion = '4.9.0';
   static const String versionUrl =
       'https://raw.githubusercontent.com/JrBlackRose/shield-mobile/main/version.json';
   static const Duration minInterval = Duration(hours: 6);
@@ -234,16 +234,25 @@ ConfluenceScore? computeConfluence({
   final ema9 = ema(closes, 9);
   final ema21 = ema(closes, 21);
   final range = last.h - last.l;
-  final strongClose = range <= 0 ? true : ((last.c - last.l) / range) >= 0.45;
-  final trendAligned = ema9 >= ema21 && price >= ema9 && strongClose;
+  // PULLBACK SNIPER LOGIC: Look for a lower wick (hammer) showing buyers defending the dip
+  final bodyBottom = math.min(last.o, last.c);
+  final lowerWick = bodyBottom - last.l;
+  final isDipRejection = range <= 0 ? true : (lowerWick / range) >= 0.35; // 35% lower wick
+
+  // Support proximity: price should be resting near the EMA9/21, not flying away from it
+  final distFromEma = (price - math.max(ema9, ema21)).abs() / price;
+  final nearSupport = distFromEma < 0.0035; // Within 0.35% of moving average
+
+  final trendAligned = ema9 >= ema21 && price >= ema21 && isDipRejection && nearSupport;
 
   final vwap = sessionVwap(session);
   final vr = volumeRatio(done.map((c) => c.v).toList(), avgBars: ConfluenceRules.volAvgBars);
   var rsi = wilderRsi(closes, period: ConfluenceRules.rsiPeriod);
   if (vwap == null || vr == null || rsi == null) return null;
-  // Penalize RSI score if EMA9 < EMA21 downtrend or weak rejection wick
-  if (!trendAligned && rsi >= 50.0 && rsi < 70.0) {
-    rsi = 44.0;
+
+  // Penalize RSI if it's not a valid pullback to support
+  if (!trendAligned && rsi >= 45.0 && rsi <= 60.0) {
+    rsi = 40.0; // Force it out of the constructive band
   }
   return ConfluenceScore(
     symbol: symbol,
