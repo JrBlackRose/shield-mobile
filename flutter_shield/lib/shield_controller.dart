@@ -3425,7 +3425,7 @@ class _NewsScorer {
       }
       return out;
     } catch (_) {
-      throw const PlanAbort('Gemini returned a malformed news-scoring response.');
+      return const <_Scored>[];
     }
   }
 }

@@ -230,8 +230,8 @@ class _CryptoGuardian {
     final targetQty = double.tryParse(qtyTxt) ?? 0.0;
     if (targetQty <= 0.0) return;
     // Let trailing stop work; only hard-harvest crypto on a >= +4.2% (>2R) surge
-    if (p.avgEntry > 0 && last >= (p.avgEntry * 10420 ~/ 10000)) {
-      c._log('💰 GUARDIAN banking >2R crypto surge on $sym (+${((last - p.avgEntry) / p.avgEntry * 100).toStringAsFixed(2)}%)', level: 'ok');
+    if (p.avgEntry > 0 && last >= (p.avgEntry * 10145 ~/ 10000)) {
+      c._log('💰 GUARDIAN banking +1.45% crypto target on $sym (+${((last - p.avgEntry) / p.avgEntry * 100).toStringAsFixed(2)}%)', level: 'ok');
       final res = await c.closePosition(sym);
       unawaited(c._notifyOS('💰 Crypto Surge Banked: $sym', res.message));
       return;
@@ -266,8 +266,33 @@ class _CryptoGuardian {
     }
 
     final hwBefore = t.highWater;
-    final r = ratchetStop(t, last);
-    if (r.moved) {
+      if (p.avgEntry > 0) t.entry = p.avgEntry;
+      if (last > t.highWater) t.highWater = last;
+      var r = ratchetStop(t, last);
+      final entryPx = p.avgEntry > 0 ? p.avgEntry : t.entry;
+      if (entryPx > 0 && t.highWater > entryPx) {
+        final peakBps = ((t.highWater - entryPx) * kBpsDenom) ~/ entryPx;
+        final ceiling = last * (kBpsDenom - CryptoRules.minStopGapBps) ~/ kBpsDenom;
+        Pips desiredStop = 0;
+        String lockNote = '';
+        if (peakBps >= 85) {
+          desiredStop = math.max(entryPx * 10025 ~/ 10000, t.highWater * 9965 ~/ 10000);
+          lockNote = 'profit-trail +${(peakBps / 100).toStringAsFixed(2)}% peak';
+        } else if (peakBps >= 50) {
+          desiredStop = entryPx * 10012 ~/ 10000;
+          lockNote = 'break-even lock';
+        }
+        if (desiredStop > 0) {
+          final clampedStop = roundToTick(math.min(desiredStop, ceiling));
+          final minStep = math.max(1, entryPx * 8 ~/ 10000);
+          final baseStop = r.moved ? r.stop : t.stop;
+          if (clampedStop > baseStop + minStep) {
+            final newLim = stopLimitFor(clampedStop, t.atrPct);
+            r = (moved: true, stop: clampedStop, stopLimit: newLim, r: peakBps / 100.0, note: lockNote);
+          }
+        }
+      }
+      if (r.moved) {
       t.stop = r.stop;
       t.stopLimit = r.stopLimit;
       _save();
@@ -276,7 +301,7 @@ class _CryptoGuardian {
         o = await ex.replaceStop(orderId: '${stopOrder['id']}', stop: r.stop, limit: r.stopLimit);
       } catch (_) {
         await ex.cancelOrderById('${stopOrder['id']}');
-        await Future<void>.delayed(const Duration(milliseconds: 350));
+        await Future<void>.delayed(const Duration(milliseconds: 900));
         o = await ex.placeStopLimitSell(
           symbol: _cryptoSlash(sym),
           qtyText: floorQtyText(p.qtyDouble),
