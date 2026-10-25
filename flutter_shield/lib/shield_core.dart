@@ -722,8 +722,8 @@ class ConfluenceScore {
 
   bool get aboveVwap => price > vwapValue;
   bool get volumeSurge => volumeRatio >= 1.5;
-  bool get rsiConstructive => rsiValue >= 45.0 && rsiValue <= 60.0; // Pullback cooling zone
-  bool get rsiOverbought => rsiValue > 60.0; // Extended/Climax zone
+  bool get rsiConstructive => rsiValue >= 42.0 && rsiValue <= 65.0; // Healthy pullback & bounce band
+  bool get rsiOverbought => rsiValue > 65.0; // Extended/Climax zone
 
   int get points => (aboveVwap ? 1 : 0) + (volumeSurge ? 1 : 0) + (rsiConstructive ? 1 : 0);
   int get score => ((points / 3.0) * 100).round();

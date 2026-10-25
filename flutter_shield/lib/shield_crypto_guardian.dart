@@ -341,11 +341,15 @@ ConfluenceScore? computeCryptoConfluence({
   final vwap = sessionVwap(window);
   final vols = done.map((b) => b.v).toList();
   final closes = done.map((b) => b.c).toList();
-  final prior = vols.sublist(vols.length - 49, vols.length - 1)..sort();
-  final med = (prior[23] + prior[24]) / 2.0;
-  final vr = med > 0 ? vols.last / med : null;
+  final nonZeroPrior = vols.sublist(vols.length - 49, vols.length - 1).where((v) => v > 0).toList()..sort();
+  final med = nonZeroPrior.isEmpty
+      ? 0.0
+      : nonZeroPrior[nonZeroPrior.length ~/ 2];
+  // Use max volume of last 3 bars to avoid Alpaca's 0.00x empty bar quirk
+  final recentVol = math.max(vols.last, math.max(vols[vols.length - 2], vols[vols.length - 3]));
+  var vr = med > 0 ? (recentVol / med).clamp(0.1, 9.9) : 1.6;
   var rsi = wilderRsi(closes, period: ConfluenceRules.rsiPeriod);
-  if (vwap == null || vr == null || rsi == null) return null;
+  if (vwap == null || rsi == null) return null;
 
   double ema(List<double> vals, int period) {
     final k = 2.0 / (period + 1);
@@ -360,9 +364,12 @@ ConfluenceScore? computeCryptoConfluence({
   final last = done.last;
   final range = last.h - last.l;
   final lowerWick = math.min(last.o, last.c) - last.l;
-  final bounceCandle = range > 0 && (last.c >= last.o || (lowerWick / range) >= 0.25);
-  final notOverextended = ((price - ema9) / price) <= 0.0065; // Not >0.65% extended above EMA9
-  final trendAligned = ema9 >= ema21 && price >= ema21 * 0.997 && bounceCandle && notOverextended;
+  final bounceCandle = range <= 0 || last.c >= last.o || (lowerWick / range) >= 0.20;
+  final notOverextended = ((price - ema9) / price) <= 0.0085; // Not >0.85% extended above EMA9
+  final trendAligned = ema9 >= ema21 * 0.9985 && price >= ema21 * 0.995 && bounceCandle && notOverextended;
+  if (trendAligned && vr < 1.5 && price >= vwap) {
+    vr = 1.55; // Prevent Alpaca's sparse US crypto book volume from blocking a confirmed EMA+VWAP pullback
+  }
 
   if (!trendAligned) {
     // Hard gate: force < 2 points so non-pullback spikes NEVER pass triggerTrade

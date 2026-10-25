@@ -103,7 +103,7 @@ abstract final class DataRules {
 }
 
 abstract final class UpdateRules {
-  static const String currentVersion = '5.0.0';
+  static const String currentVersion = '5.1.0';
   static const String versionUrl =
       'https://raw.githubusercontent.com/JrBlackRose/shield-mobile/main/version.json';
   static const Duration minInterval = Duration(hours: 6);
@@ -614,6 +614,12 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   Future<void> _enableBackgroundOS() async {
+    _native.setMethodCallHandler((call) async {
+      if (call.method == 'nativeTick' && vaultStatus == VaultStatus.valid) {
+        unawaited(refresh());
+      }
+      return true;
+    });
     try {
       await _native.invokeMethod('startBackground');
     } catch (_) {}
@@ -802,9 +808,9 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState s) {
     isForeground = s == AppLifecycleState.resumed;
-    if (vaultStatus == VaultStatus.valid) {
-      _startPolling();
-      if (isForeground) unawaited(refresh().then((_) => scanNews()));
+    if (vaultStatus == VaultStatus.valid && isForeground) {
+      if (_pollTimer == null || !_pollTimer!.isActive) _startPolling();
+      unawaited(refresh().then((_) => scanNews()));
     }
   }
 
@@ -1454,13 +1460,34 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
       final candidates = _scanCandidates(nowUtc);
       if (candidates.isEmpty) return; // nothing ready yet: do NOT start the interval, retry next poll
       _lastAutoScanAt = nowUtc; // only after the candidate pool is ready
-      final raw = await _coreChat(_scoutPrompt(nowUtc, candidates));
-      _lastAgentError = null;
-      final pick = _parseScoutPick(raw, candidates.toSet());
-      if (pick == null) {
-        _log('🔍 Scout scanned ${candidates.length} live pairs — no pullback setup met entry criteria.', level: 'info', notify: false);
+      // Pre-screen candidates with the quantitative Pullback Sniper so we never get stuck on BTCUSD alone!
+      final passing = <String>[];
+      for (final sym in candidates.take(8)) {
+        try {
+          final qs = await _liveQuote(sym);
+          if (qs.ask <= 0) continue;
+          final cScore = await _computeConfluence(sym, qs.ask, live: _resolveVenue(sym) != VenueKind.closed);
+          if (cScore != null && cScore.points >= 2) {
+            passing.add(sym);
+          }
+        } catch (_) {}
+      }
+      if (passing.isEmpty) {
+        _log('🔍 Scout checked ${candidates.take(8).length} pairs — 0 passed Pullback Sniper (>=2/3) this round.', level: 'info', notify: false);
         return;
       }
+      String? pick;
+      if (passing.length == 1) {
+        pick = passing.first;
+      } else {
+        try {
+          final raw = await _coreChat(_scoutPrompt(nowUtc, passing));
+          pick = _parseScoutPick(raw, passing.toSet()) ?? passing.first;
+        } catch (_) {
+          pick = passing.first;
+        }
+      }
+      _lastAgentError = null;
       if (executionMode != ExecMode.auto || autoLockReason != null || tradeSubmitting) return;
     if (_activeSlotCount >= AutoRules.maxAutoPositions) return;
       _agentTried[pick] = DateTime.now().toUtc();

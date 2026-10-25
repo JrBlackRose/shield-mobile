@@ -8,6 +8,8 @@ with open(manifest_path, "r", encoding="utf-8") as f:
 
 perms = """<uses-permission android:name="android.permission.INTERNET"/>
     <uses-permission android:name="android.permission.WAKE_LOCK"/>
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"/>
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
@@ -66,9 +68,13 @@ import android.content.pm.ServiceInfo
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.net.wifi.WifiManager
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.PowerManager
 import android.provider.Settings
+import android.view.WindowManager
 import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
 import io.flutter.embedding.android.FlutterActivity
@@ -82,6 +88,7 @@ class ShieldForegroundService : Service() {
     }
 
     private var wakeLock: PowerManager.WakeLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -102,6 +109,19 @@ class ShieldForegroundService : Service() {
             setReferenceCounted(false)
             acquire()
         }
+        try {
+            val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+            val lockMode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+            } else {
+                @Suppress("DEPRECATION")
+                WifiManager.WIFI_MODE_FULL_HIGH_PERF
+            }
+            wifiLock = wm.createWifiLock(lockMode, "Shield::WifiWakeLock").apply {
+                setReferenceCounted(false)
+                acquire()
+            }
+        } catch (_: Exception) {}
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -141,6 +161,7 @@ class ShieldForegroundService : Service() {
     override fun onDestroy() {
         try {
             if (wakeLock?.isHeld == true) wakeLock?.release()
+            if (wifiLock?.isHeld == true) wifiLock?.release()
         } catch (_: Exception) {}
         super.onDestroy()
     }
@@ -152,17 +173,37 @@ class MainActivity: FlutterActivity() {
     private val CHANNEL = "shield/native"
     private val ALERT_CHANNEL_ID = "shield_high_alerts"
     private var notifId = 100
+    private var methodChannel: MethodChannel? = null
+    private val bgHandler = Handler(Looper.getMainLooper())
+    private val bgRunnable = object : Runnable {
+        override fun run() {
+            try {
+                methodChannel?.invokeMethod("nativeTick", null)
+            } catch (_: Exception) {}
+            bgHandler.postDelayed(this, 25000L)
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         createAlertNotificationChannel()
         requestNotificationPermission()
         startShieldForegroundService()
     }
 
+    override fun onDestroy() {
+        bgHandler.removeCallbacks(bgRunnable)
+        super.onDestroy()
+    }
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
-        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
+        val ch = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
+        methodChannel = ch
+        bgHandler.removeCallbacks(bgRunnable)
+        bgHandler.postDelayed(bgRunnable, 25000L)
+        ch.setMethodCallHandler { call, result ->
             when (call.method) {
                 "notify" -> {
                     val title = call.argument<String>("title") ?: "Project Shield Alert"
