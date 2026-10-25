@@ -366,7 +366,8 @@ ConfluenceScore? computeCryptoConfluence({
   final lowerWick = math.min(last.o, last.c) - last.l;
   final bounceCandle = range <= 0 || last.c >= last.o || (lowerWick / range) >= 0.20;
   final notOverextended = ((price - ema9) / price) <= 0.0085; // Not >0.85% extended above EMA9
-  final trendAligned = ema9 >= ema21 * 0.9985 && price >= ema21 * 0.995 && bounceCandle && notOverextended;
+  final ema50 = ema(closes, 50);
+  final trendAligned = ema9 >= ema21 * 0.9985 && ema21 >= ema50 * 0.996 && price >= ema21 * 0.995 && bounceCandle && notOverextended;
   if (trendAligned && vr < 1.5 && price >= vwap) {
     vr = 1.55; // Prevent Alpaca's sparse US crypto book volume from blocking a confirmed EMA+VWAP pullback
   }
