@@ -1,5 +1,5 @@
 // ============================================================================
-// PROJECT SHIELD v5.2 — lib/main.dart  (UI shell only)
+// PROJECT SHIELD v6.0 — lib/main.dart  (UI shell only)
 //
 // Imports the pure core and the controller:
 //   shield_core.dart        risk math, formatting, models, watch-link types
@@ -340,7 +340,7 @@ class _ShieldHomeState extends State<ShieldHome> {
     return Scaffold(
       appBar: AppBar(
         titleSpacing: 12,
-        title: const Text('🛡️ SHIELD v5.2', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 17)),
+        title: const Text('🛡️ SHIELD v6.0', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 17)),
         actions: [
           if (c.updateAvailable)
             IconButton(

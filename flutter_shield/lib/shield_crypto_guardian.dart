@@ -77,6 +77,9 @@ class _CryptoGuardian {
   final Map<String, TrailState> trails = <String, TrailState>{};
   final Map<String, ({DateTime at, CryptoVol vol})> _volCache = {};
   final Map<String, int> _breach = <String, int>{};
+  final Map<String, double> _peakPlUsd = <String, double>{};
+  final Map<String, int> _peakGainBps = <String, int>{};
+  final Map<String, int> _stockLossBreach = <String, int>{};
   bool _busy = false, _loaded = false;
   DateTime _lastRun = DateTime.fromMillisecondsSinceEpoch(0, isUtc: true);
   String? _lastErr;
@@ -89,10 +92,22 @@ class _CryptoGuardian {
       for (final e in raw.entries) {
         trails['${e.key}'] = TrailState.fromJson((e.value as Map).cast<String, dynamic>());
       }
+      final rawPeaks = jsonDecode(c._prefs.getString('sh_peaks_usd') ?? '{}') as Map;
+      for (final e in rawPeaks.entries) {
+        _peakPlUsd['${e.key}'] = (e.value as num).toDouble();
+      }
+      final rawBps = jsonDecode(c._prefs.getString('sh_peaks_bps') ?? '{}') as Map;
+      for (final e in rawBps.entries) {
+        _peakGainBps['${e.key}'] = (e.value as num).toInt();
+      }
     } catch (_) {}
   }
 
-  void _save() => c._prefs.setString('sh_trails', jsonEncode({for (final e in trails.entries) e.key: e.value.toJson()}));
+  void _save() {
+    c._prefs.setString('sh_trails', jsonEncode({for (final e in trails.entries) e.key: e.value.toJson()}));
+    c._prefs.setString('sh_peaks_usd', jsonEncode(_peakPlUsd));
+    c._prefs.setString('sh_peaks_bps', jsonEncode(_peakGainBps));
+  }
 
   void clear() {
     trails.clear();
@@ -159,6 +174,7 @@ class _CryptoGuardian {
       });
       if (dirty) _save();
 
+      await _runSomesAutoCashout();
       for (final e in held.entries) {
         if (c._closing.contains(e.key)) continue;
         try {
@@ -174,6 +190,90 @@ class _CryptoGuardian {
     } finally {
       _busy = false;
     }
+  }
+
+  Future<void> _runSomesAutoCashout() async {
+    final activeSyms = <String>{};
+    var peaksDirty = false;
+    for (final p in c.positions) {
+      if (!p.isLong || p.avgEntry <= 0 || p.currentPrice <= 0 || p.qtyDouble <= 0) continue;
+      final sym = normSym(p.symbol);
+      activeSyms.add(sym);
+      if (c._closing.contains(sym)) continue;
+      final isCrypto = isCryptoSymbol(sym);
+      // Stocks can only be market-closed when the regular US session is open
+      if (!isCrypto && !c.sessionOpen) continue;
+
+      final plUsd = p.unrealizedPl / kPipsPerUsd;
+      final gainBps = ((p.currentPrice - p.avgEntry) * kBpsDenom) ~/ p.avgEntry;
+
+      final prevPeakUsd = _peakPlUsd[sym] ?? plUsd;
+      final prevPeakBps = _peakGainBps[sym] ?? gainBps;
+      final peakUsd = math.max(prevPeakUsd, plUsd);
+      final peakBps = math.max(prevPeakBps, gainBps);
+      if (peakUsd > prevPeakUsd || peakBps > prevPeakBps || !_peakPlUsd.containsKey(sym)) {
+        _peakPlUsd[sym] = peakUsd;
+        _peakGainBps[sym] = peakBps;
+        peaksDirty = true;
+      }
+
+      // 1. Instant Base-Hit Target Harvest (+$48 USD or +0.58% Stock / +0.75% Crypto)
+      final targetBps = isCrypto ? 75 : 58;
+      if (plUsd >= 48.0 || gainBps >= targetBps) {
+        c._log('💰 AUTO-CASHOUT $sym: Banked +\$${plUsd.toStringAsFixed(2)} (+${(gainBps / 100).toStringAsFixed(2)}%) base-hit target!', level: 'ok');
+        final res = await c.closePosition(sym);
+        unawaited(c._notifyOS('💰 Target Banked: $sym (+\$${plUsd.toStringAsFixed(2)})', res.message));
+        _peakPlUsd.remove(sym);
+        _peakGainBps.remove(sym);
+        peaksDirty = true;
+        continue;
+      }
+
+      // 2. Somes +$20 Peak-Pullback Cashout:
+      //    If position reached >= +$20 (or >= +0.22%) and pulls back 28% from peak while still >= +$9, bank it!
+      if ((peakUsd >= 20.0 || peakBps >= 22) && plUsd >= 9.0 && plUsd <= peakUsd * 0.72) {
+        c._log('💰 SOMES PROFIT-LOCK $sym: Peaked at +\$${peakUsd.toStringAsFixed(2)}, banked +\$${plUsd.toStringAsFixed(2)} on pullback!', level: 'ok');
+        final res = await c.closePosition(sym);
+        unawaited(c._notifyOS('💰 Profit Locked: $sym (+\$${plUsd.toStringAsFixed(2)})', res.message));
+        _peakPlUsd.remove(sym);
+        _peakGainBps.remove(sym);
+        peaksDirty = true;
+        continue;
+      }
+
+      // 3. The +$14 Break-Even Shield:
+      //    If position was up >= +$14 (or >= +0.16%) and fades down to <= +$3.50, close before it can ever turn red!
+      if ((peakUsd >= 14.0 || peakBps >= 16) && plUsd <= 3.50) {
+        c._log('🛡️ BREAK-EVEN SHIELD $sym: Peaked at +\$${peakUsd.toStringAsFixed(2)}, exited at +\$${plUsd.toStringAsFixed(2)} so winner never turns red!', level: 'ok');
+        final res = await c.closePosition(sym);
+        unawaited(c._notifyOS('🛡️ Break-Even Saved: $sym', res.message));
+        _peakPlUsd.remove(sym);
+        _peakGainBps.remove(sym);
+        peaksDirty = true;
+        continue;
+      }
+
+      // 4. Tight Stop-Loss Guard (-0.68% or -$65 USD)
+      if (gainBps <= -68 || plUsd <= -65.0) {
+        final n = (_stockLossBreach[sym] ?? 0) + 1;
+        _stockLossBreach[sym] = n;
+        if (n >= 2) {
+          c._log('🚨 TIGHT STOP-LOSS $sym: Cut loss at \$${plUsd.toStringAsFixed(2)} (${(gainBps / 100).toStringAsFixed(2)}%) to protect capital.', level: 'error');
+          final res = await c.closePosition(sym);
+          unawaited(c._notifyOS('🛡️ Tight Stop-Loss: $sym', res.message));
+          _stockLossBreach.remove(sym);
+          _peakPlUsd.remove(sym);
+          _peakGainBps.remove(sym);
+          peaksDirty = true;
+        }
+      } else {
+        _stockLossBreach.remove(sym);
+      }
+    }
+
+    _peakPlUsd.removeWhere((k, _) => !activeSyms.contains(k));
+    _peakGainBps.removeWhere((k, _) => !activeSyms.contains(k));
+    if (peaksDirty) _save();
   }
 
   Future<void> _protect(_AlpacaExtras ex, String sym, Position p, DateTime now) async {
@@ -401,6 +501,14 @@ ConfluenceScore? computeCryptoConfluence({
     // Hard gate: force < 2 points so non-pullback spikes NEVER pass triggerTrade
     rsi = 38.0;
   }
+  final simWins = simulate100Paths(
+    closes: closes,
+    highs: done.map((b) => b.h).toList(),
+    lows: done.map((b) => b.l).toList(),
+    price: price,
+    isCrypto: true,
+    trendAligned: trendAligned,
+  );
   return ConfluenceScore(
     symbol: symbol,
     price: price,
@@ -409,5 +517,6 @@ ConfluenceScore? computeCryptoConfluence({
     rsiValue: rsi,
     barsUsed: done.length,
     asOf: done.last.t,
+    simWins: simWins,
   );
 }

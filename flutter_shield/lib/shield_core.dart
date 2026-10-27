@@ -27,10 +27,10 @@ abstract final class RiskRules {
   static const int riskBudgetBps = 100;
   static const int notionalCapBps = 1000;
   static const int collarBps = 15;
-  static const int swingStopBps = 200;
-  static const int swingTargetBps = 400;
-  static const int intradayStopBps = 150;
-  static const int intradayTargetBps = 240;
+  static const int swingStopBps = 110;
+  static const int swingTargetBps = 120;
+  static const int intradayStopBps = 65;
+  static const int intradayTargetBps = 60;
   static const int maxDriftOfStopBps = 2000;
 }
 
@@ -699,6 +699,96 @@ class FeedEvent {
   }
 }
 
+
+/// Simulates 100 forward price paths (24 x 5-min bars = 2 hours) using
+/// empirical candle returns, intrabar wick excursions, and EMA drift.
+/// Returns the number of winning paths out of 100 (0..100).
+int simulate100Paths({
+  required List<double> closes,
+  required List<double> highs,
+  required List<double> lows,
+  required double price,
+  required bool isCrypto,
+  required bool trendAligned,
+}) {
+  if (!trendAligned || closes.length < 30 || price <= 0) return 28;
+  final n = closes.length;
+  final start = math.max(1, n - 36);
+  final rets = <double>[];
+  final upWicks = <double>[];
+  final dnWicks = <double>[];
+  for (var i = start; i < n; i++) {
+    final prev = closes[i - 1];
+    if (prev <= 0) continue;
+    rets.add(((closes[i] - prev) / prev).clamp(-0.025, 0.025).toDouble());
+    upWicks.add(((highs[i] - prev) / prev).clamp(0.0, 0.030).toDouble());
+    dnWicks.add(((lows[i] - prev) / prev).clamp(-0.030, 0.0).toDouble());
+  }
+  if (rets.length < 12) return 35;
+
+  final m = rets.length;
+  final recentCount = math.min(12, m);
+  var recentSum = 0.0;
+  for (var i = m - recentCount; i < m; i++) {
+    recentSum += rets[i];
+  }
+  final recentMean = recentSum / recentCount;
+  var varSum = 0.0;
+  for (final r in rets) {
+    final d = r - recentMean;
+    varSum += d * d;
+  }
+  final sigma = math.sqrt(varSum / m).clamp(0.0004, 0.0120).toDouble();
+
+  final targetPct = isCrypto ? 0.0058 : 0.0048;
+  const beTriggerPct = 0.0020; // +0.20% (~+$19 on $9.5k slot) locks break-even
+  const initialStopPct = -0.0065; // -0.65% tight stop
+
+  var wins = 0;
+  final baseSeed = (price * 10000).round() ^ (n * 7919);
+
+  for (var p = 0; p < 100; p++) {
+    var seed = (baseSeed + p * 1103515245 + 12345) & 0x7fffffff;
+    var cumRet = 0.0;
+    var activeStop = initialStopPct;
+    var beLocked = false;
+    var outcome = 0; // 1 = win, -1 = loss
+
+    for (var step = 0; step < 24; step++) {
+      seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+      final useRecent = (seed & 1) == 0;
+      final idx = useRecent
+          ? (m - recentCount + ((seed >> 3) % recentCount))
+          : ((seed >> 3) % m);
+      seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+      final u = ((seed % 2001) - 1000) / 1000.0; // -1.0 .. +1.0
+      final shock = u * sigma * 0.45 + recentMean * 0.25;
+
+      final stepHigh = cumRet + math.max(rets[idx], upWicks[idx] * 0.72) + math.max(0.0, shock);
+      final stepLow = cumRet + math.min(rets[idx], dnWicks[idx] * 0.72) + math.min(0.0, shock);
+
+      if (stepHigh >= targetPct) {
+        outcome = 1;
+        break;
+      }
+      if (stepHigh >= beTriggerPct) {
+        beLocked = true;
+        activeStop = 0.0004; // Break-even shield armed
+      }
+      if (stepLow <= activeStop) {
+        outcome = beLocked ? 1 : -1;
+        break;
+      }
+      cumRet += rets[idx] + shock;
+    }
+
+    if (outcome == 1 || (outcome == 0 && (beLocked || cumRet >= 0.0005))) {
+      wins++;
+    }
+  }
+  return wins.clamp(0, 100);
+}
+
 class ConfluenceSignal {
   const ConfluenceSignal({required this.detail, required this.strength});
   final String detail;
@@ -714,11 +804,13 @@ class ConfluenceScore {
     required this.rsiValue,
     required this.barsUsed,
     required this.asOf,
+    this.simWins = 70,
   });
   final String symbol;
   final double price, vwapValue, volumeRatio, rsiValue;
   final int barsUsed;
   final DateTime asOf;
+  final int simWins;
 
   bool get aboveVwap => price > vwapValue;
   bool get volumeSurge => volumeRatio >= 1.5;
@@ -742,7 +834,7 @@ class ConfluenceScore {
         strength: (volumeRatio / 2.0).clamp(0.0, 1.0).toDouble(),
       );
 
-  String get summary => '$points/3$grade · VWAP ${aboveVwap ? "▲" : "▼"} ${vwapValue.toStringAsFixed(2)}'
+  String get summary => '$points/3$grade · 🎲 Sim $simWins/100 · VWAP ${aboveVwap ? "▲" : "▼"} ${vwapValue.toStringAsFixed(2)}'
       ' · Vol ${volumeRatio.toStringAsFixed(2)}x'
       ' · RSI ${rsiValue.toStringAsFixed(1)}${rsiOverbought ? " (overbought)" : ""}';
 
@@ -754,6 +846,7 @@ class ConfluenceScore {
         'rsi': rsiValue,
         'n': barsUsed,
         't': asOf.toIso8601String(),
+        'sim': simWins,
       };
 
   factory ConfluenceScore.fromJson(Map<String, dynamic> j) => ConfluenceScore(
@@ -764,6 +857,7 @@ class ConfluenceScore {
         rsiValue: (j['rsi'] as num).toDouble(),
         barsUsed: (j['n'] as num).toInt(),
         asOf: DateTime.parse(j['t'] as String),
+        simWins: (j['sim'] as num?)?.toInt() ?? 70,
       );
 }
 

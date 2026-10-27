@@ -103,7 +103,7 @@ abstract final class DataRules {
 }
 
 abstract final class UpdateRules {
-  static const String currentVersion = '5.2.0';
+  static const String currentVersion = '6.0.0';
   static const String versionUrl =
       'https://raw.githubusercontent.com/JrBlackRose/shield-mobile/main/version.json';
   static const Duration minInterval = Duration(hours: 6);
@@ -249,6 +249,14 @@ ConfluenceScore? computeConfluence({
     // Hard gate: force < 2/3 points so breakout spikes with VWAP + Volume cannot sneak past triggerTrade
     rsi = 38.0;
   }
+  final simWins = simulate100Paths(
+    closes: closes,
+    highs: done.map((b) => b.h).toList(),
+    lows: done.map((b) => b.l).toList(),
+    price: price,
+    isCrypto: crypto,
+    trendAligned: trendAligned,
+  );
   return ConfluenceScore(
     symbol: symbol,
     price: price,
@@ -257,6 +265,7 @@ ConfluenceScore? computeConfluence({
     rsiValue: rsi,
     barsUsed: done.length,
     asOf: last.t,
+    simWins: simWins,
   );
 }
 
@@ -1461,19 +1470,21 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
       if (candidates.isEmpty) return; // nothing ready yet: do NOT start the interval, retry next poll
       _lastAutoScanAt = nowUtc; // only after the candidate pool is ready
       // Pre-screen candidates with the quantitative Pullback Sniper so we never get stuck on BTCUSD alone!
-      final passing = <String>[];
-      for (final sym in candidates.take(8)) {
+      final scoredPairs = <({String sym, int sim})>[];
+      for (final sym in candidates.take(10)) {
         try {
           final qs = await _liveQuote(sym);
           if (qs.ask <= 0) continue;
           final cScore = await _computeConfluence(sym, qs.ask, live: _resolveVenue(sym) != VenueKind.closed);
-          if (cScore != null && cScore.points >= 2) {
-            passing.add(sym);
+          if (cScore != null && cScore.points >= 2 && cScore.simWins >= 62) {
+            scoredPairs.add((sym: sym, sim: cScore.simWins));
           }
         } catch (_) {}
       }
+      scoredPairs.sort((a, b) => b.sim.compareTo(a.sim));
+      final passing = scoredPairs.map((e) => e.sym).toList();
       if (passing.isEmpty) {
-        _log('🔍 Scout checked ${candidates.take(8).length} pairs — 0 passed Pullback Sniper (>=2/3) this round.', level: 'info', notify: false);
+        _log('🎲 Scout simulated ${candidates.take(10).length} tickers (100 paths each) — 0 achieved ≥62% win probability this round.', level: 'info', notify: false);
         return;
       }
       String? pick;
@@ -1751,10 +1762,10 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
         _log('📊 $sym ${conf.summary}', notify: false);
       }
 
-      // Hard Quantitative Confluence Gate: require >= 2/3 on live venues
-      if (!offHours && !qs.fromSnapshot && (conf == null || conf.points < 2)) {
+      // Hard Quantitative Confluence + 100-Path Monte Carlo Gate: require >= 2/3 AND >= 62/100 paths
+      if (!offHours && !qs.fromSnapshot && (conf == null || conf.points < 2 || conf.simWins < 62)) {
         throw RiskReject(
-          'Confluence ${conf?.points ?? 0}/3 WEAK (requires ≥ 2/3). Trade blocked for $sym.',
+          'Confluence ${conf?.points ?? 0}/3 · 100-Path Sim ${conf?.simWins ?? 0}/100 (requires ≥ 2/3 & ≥ 62/100 win paths). Trade blocked for $sym.',
         );
       }
 
