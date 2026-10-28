@@ -157,7 +157,7 @@ class _CryptoGuardian {
       final ex = c._extras();
       final held = <String, Position>{
         for (final p in c.positions)
-          if (p.isLong && isCryptoSymbol(p.symbol) && p.qtyDouble >= 0.000001 && p.marketValue.abs() >= (kPipsPerUsd * 3 ~/ 2)) normSym(p.symbol): p,
+          if (p.isLong && p.qtyDouble >= 0.000001 && p.marketValue.abs() >= (kPipsPerUsd * 3 ~/ 2)) normSym(p.symbol): p,
       };
 
       var dirty = false;
