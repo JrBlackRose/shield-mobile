@@ -1488,8 +1488,10 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
 
       const bearEtfs = {'SQQQ', 'SOXS', 'SPXS', 'TSLQ', 'NVDS'};
       final newsSyms = <String>{
-        for (final n in feed)
-          if (n.sentiment >= 0.78) ...n.symbols.map(normSym),
+        for (final s in newsSignals)
+          if (s.sentiment >= AutoRules.newsBuySentiment &&
+              nowUtc.difference(s.at) <= AutoRules.newsFreshness)
+            normSym(s.ticker),
       };
 
       final filteredPool = candidates.where((sym) {
