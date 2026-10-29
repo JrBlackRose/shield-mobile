@@ -27,10 +27,10 @@ abstract final class RiskRules {
   static const int riskBudgetBps = 100;
   static const int notionalCapBps = 1000;
   static const int collarBps = 15;
-  static const int swingStopBps = 110;
-  static const int swingTargetBps = 120;
-  static const int intradayStopBps = 65;
-  static const int intradayTargetBps = 60;
+  static const int swingStopBps = 95;
+  static const int swingTargetBps = 90;
+  static const int intradayStopBps = 55;
+  static const int intradayTargetBps = 45;
   static const int maxDriftOfStopBps = 2000;
 }
 
@@ -364,11 +364,11 @@ const List<String> kCryptoScanPairs = [
 
 /// Top liquid US tickers (large caps + index ETFs).
 const List<String> kLiquidUsEquities = [
-  'SPY', 'QQQ', 'IWM', 'AAPL', 'MSFT', 'NVDA', 'AMZN', 'GOOGL', 'META', 'TSLA',
-  'AVGO', 'AMD', 'NFLX', 'JPM', 'V', 'MA', 'COST', 'WMT', 'LLY', 'UNH',
-  'XOM', 'ORCL', 'CRM', 'ADBE', 'INTC', 'MU', 'QCOM', 'PLTR', 'COIN', 'UBER',
-  'SHOP', 'BA', 'DIS', 'PYPL', 'BAC', 'CSCO', 'PEP', 'KO', 'HD', 'ABBV',
-  'MRK', 'TSM', 'ARM', 'SMCI', 'NOW', 'PANW', 'CRWD', 'SNOW', 'SOFI', 'HOOD',
+  'NVDA', 'TSLA', 'AMD', 'PLTR', 'META', 'AMZN', 'NFLX', 'MSFT', 'AAPL', 'GOOGL',
+  'AVGO', 'MU', 'SMCI', 'ARM', 'COIN', 'HOOD', 'MSTR', 'SOFI', 'HIMS', 'APP',
+  'CRWD', 'PANW', 'SNOW', 'SHOP', 'UBER', 'ORCL', 'CRM', 'QCOM', 'TSM', 'LLY',
+  // Inverse Short ETFs (let the bot profit when the market/tech dumps!)
+  'SQQQ', 'SOXS', 'SPXS', 'TSLQ', 'NVDS',
 ];
 
 /// Names that habitually move on news/earnings outside regular hours.
@@ -437,7 +437,7 @@ List<String> dynamicScanUniverse(DateTime utc, {required bool clockOpen}) {
     out.addAll(kLiquidUsEquities);
     out.addAll(kExtendedHoursMovers);
   }
-  out.addAll(kCryptoScanPairs);
+  // Crypto disabled in AUTO scan universe
   return out.toList();
 }
 

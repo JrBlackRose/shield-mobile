@@ -68,6 +68,9 @@ import android.content.pm.ServiceInfo
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.media.AudioAttributes
+import android.media.AudioFormat
+import android.media.AudioTrack
 import android.net.wifi.WifiManager
 import android.os.Handler
 import android.os.IBinder
@@ -89,6 +92,7 @@ class ShieldForegroundService : Service() {
 
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
+    private var silentTrack: AudioTrack? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -117,9 +121,33 @@ class ShieldForegroundService : Service() {
                 @Suppress("DEPRECATION")
                 WifiManager.WIFI_MODE_FULL_HIGH_PERF
             }
-            wifiLock = wm.createWifiLock(lockMode, "Shield::WifiWakeLock").apply {
+                        wifiLock = wm.createWifiLock(lockMode, "Shield::WifiWakeLock").apply {
                 setReferenceCounted(false)
                 acquire()
+            }
+        } catch (_: Exception) {}
+        try {
+            val sampleRate = 8000
+            val bufSize = AudioTrack.getMinBufferSize(
+                sampleRate,
+                AudioFormat.CHANNEL_OUT_MONO,
+                AudioFormat.ENCODING_PCM_16BIT
+            ).coerceAtLeast(sampleRate * 2)
+            val attrs = AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_MEDIA)
+                .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                .build()
+            val fmt = AudioFormat.Builder()
+                .setSampleRate(sampleRate)
+                .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                .build()
+            silentTrack = AudioTrack(attrs, fmt, bufSize, AudioTrack.MODE_STATIC, 0).apply {
+                val silence = ByteArray(bufSize)
+                write(silence, 0, silence.size)
+                setLoopPoints(0, bufSize / 2, -1)
+                setVolume(0.0f)
+                play()
             }
         } catch (_: Exception) {}
     }
@@ -160,6 +188,7 @@ class ShieldForegroundService : Service() {
 
     override fun onDestroy() {
         try {
+            try { silentTrack?.stop(); silentTrack?.release() } catch (_: Exception) {}
             if (wakeLock?.isHeld == true) wakeLock?.release()
             if (wifiLock?.isHeld == true) wifiLock?.release()
         } catch (_: Exception) {}
@@ -175,13 +204,29 @@ class MainActivity: FlutterActivity() {
     private var notifId = 100
     private var methodChannel: MethodChannel? = null
     private val bgHandler = Handler(Looper.getMainLooper())
-    private val bgRunnable = object : Runnable {
+        private val bgRunnable = object : Runnable {
         override fun run() {
             try {
+                flutterEngine?.lifecycleChannel?.appIsResumed()
                 methodChannel?.invokeMethod("nativeTick", null)
             } catch (_: Exception) {}
-            bgHandler.postDelayed(this, 25000L)
+            bgHandler.postDelayed(this, 12000L)
         }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        try { flutterEngine?.lifecycleChannel?.appIsResumed() } catch (_: Exception) {}
+    }
+
+    override fun onStop() {
+        super.onStop()
+        try { flutterEngine?.lifecycleChannel?.appIsResumed() } catch (_: Exception) {}
+    }
+
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        try { flutterEngine?.lifecycleChannel?.appIsResumed() } catch (_: Exception) {}
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {

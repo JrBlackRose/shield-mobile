@@ -103,7 +103,7 @@ abstract final class DataRules {
 }
 
 abstract final class UpdateRules {
-  static const String currentVersion = '6.0.0';
+  static const String currentVersion = '7.0.0';
   static const String versionUrl =
       'https://raw.githubusercontent.com/JrBlackRose/shield-mobile/main/version.json';
   static const Duration minInterval = Duration(hours: 6);
@@ -238,7 +238,8 @@ ConfluenceScore? computeConfluence({
   final lowerWick = bodyBottom - last.l;
   final bounceCandle = range > 0 && (last.c >= last.o || (lowerWick / range) >= 0.25);
   final notOverextended = ((price - ema9) / price) <= 0.0060; // Within 0.60% above EMA9, not chasing a spike
-  final trendAligned = ema9 >= ema21 && price >= ema21 * 0.997 && bounceCandle && notOverextended;
+  final greenIgnition = last.c > last.o && closes.length >= 3 && last.c >= closes[closes.length - 2];
+  final trendAligned = !crypto && greenIgnition && ema9 >= ema21 && price > vwap && rsi >= 50.0 && rsi <= 65.0;
 
   final vwap = sessionVwap(session);
   final vr = volumeRatio(done.map((c) => c.v).toList(), avgBars: ConfluenceRules.volAvgBars);
@@ -1466,7 +1467,7 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
     if (last != null && nowUtc.difference(last) < AutoRules.scanInterval) return;
     _agentBusy = true;
     try {
-      final candidates = _scanCandidates(nowUtc);
+      final candidates = _scanCandidates(nowUtc).where((s) => !isCryptoSymbol(s)).toList();
       if (candidates.isEmpty) return; // nothing ready yet: do NOT start the interval, retry next poll
       _lastAutoScanAt = nowUtc; // only after the candidate pool is ready
       // Pre-screen candidates with the quantitative Pullback Sniper so we never get stuck on BTCUSD alone!

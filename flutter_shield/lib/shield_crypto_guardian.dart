@@ -80,6 +80,7 @@ class _CryptoGuardian {
   final Map<String, double> _peakPlUsd = <String, double>{};
   final Map<String, int> _peakGainBps = <String, int>{};
   final Map<String, int> _stockLossBreach = <String, int>{};
+  final Map<String, int> _entrySeenMs = <String, int>{};
   bool _busy = false, _loaded = false;
   DateTime _lastRun = DateTime.fromMillisecondsSinceEpoch(0, isUtc: true);
   String? _lastErr;
@@ -192,17 +193,36 @@ class _CryptoGuardian {
     }
   }
 
+  Future<({bool ok, String message})> _forceCloseStockOrCrypto(_AlpacaExtras ex, String sym) async {
+    for (final o in c._rawOrders) {
+      final oSym = normSym('${o['symbol'] ?? ''}');
+      final st = '${o['status'] ?? ''}'.toLowerCase();
+      if (oSym == sym && st != 'canceled' && st != 'filled' && st != 'expired' && st != 'rejected') {
+        try {
+          await ex.cancelOrderById('${o['id']}');
+        } catch (_) {}
+      }
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 650));
+    return c.closePosition(sym);
+  }
+
   Future<void> _runSomesAutoCashout() async {
+    final ex = c._extras();
+    final nowMs = DateTime.now().toUtc().millisecondsSinceEpoch;
     final activeSyms = <String>{};
     var peaksDirty = false;
+
     for (final p in c.positions) {
       if (!p.isLong || p.avgEntry <= 0 || p.currentPrice <= 0 || p.qtyDouble <= 0) continue;
       final sym = normSym(p.symbol);
       activeSyms.add(sym);
       if (c._closing.contains(sym)) continue;
       final isCrypto = isCryptoSymbol(sym);
-      // Stocks can only be market-closed when the regular US session is open
       if (!isCrypto && !c.sessionOpen) continue;
+
+      final firstMs = _entrySeenMs.putIfAbsent(sym, () => nowMs);
+      final ageMin = (nowMs - firstMs) / 60000.0;
 
       final plUsd = p.unrealizedPl / kPipsPerUsd;
       final gainBps = ((p.currentPrice - p.avgEntry) * kBpsDenom) ~/ p.avgEntry;
@@ -217,53 +237,78 @@ class _CryptoGuardian {
         peaksDirty = true;
       }
 
-      // 1. Instant Base-Hit Target Harvest (+$48 USD or +0.58% Stock / +0.75% Crypto)
-      final targetBps = isCrypto ? 75 : 58;
-      if (plUsd >= 48.0 || gainBps >= targetBps) {
-        c._log('💰 AUTO-CASHOUT $sym: Banked +\$${plUsd.toStringAsFixed(2)} (+${(gainBps / 100).toStringAsFixed(2)}%) base-hit target!', level: 'ok');
-        final res = await c.closePosition(sym);
-        unawaited(c._notifyOS('💰 Target Banked: $sym (+\$${plUsd.toStringAsFixed(2)})', res.message));
+      // 1. Somes Quick-Scalp Cashout (+$22 USD or +0.25%): Take quick profit immediately!
+      if (plUsd >= 22.0 || gainBps >= 25) {
+        c._log('💰 QUICK-SCALP CASHOUT $sym: Banked +\$${plUsd.toStringAsFixed(2)} (+${(gainBps / 100).toStringAsFixed(2)}%) immediately!', level: 'ok');
+        final res = await _forceCloseStockOrCrypto(ex, sym);
+        unawaited(c._notifyOS('💰 Quick Scalp Banked: $sym (+\$${plUsd.toStringAsFixed(2)})', res.message));
         _peakPlUsd.remove(sym);
         _peakGainBps.remove(sym);
+        _entrySeenMs.remove(sym);
         peaksDirty = true;
         continue;
       }
 
-      // 2. Somes +$20 Peak-Pullback Cashout:
-      //    If position reached >= +$20 (or >= +0.22%) and pulls back 28% from peak while still >= +$9, bank it!
-      if ((peakUsd >= 20.0 || peakBps >= 22) && plUsd >= 9.0 && plUsd <= peakUsd * 0.72) {
-        c._log('💰 SOMES PROFIT-LOCK $sym: Peaked at +\$${peakUsd.toStringAsFixed(2)}, banked +\$${plUsd.toStringAsFixed(2)} on pullback!', level: 'ok');
-        final res = await c.closePosition(sym);
+      // 2. Peak-Pullback Lock (Peaked >= +$13, pulled back 30% while still >= +$5):
+      if ((peakUsd >= 13.0 || peakBps >= 14) && plUsd >= 5.0 && plUsd <= peakUsd * 0.70) {
+        c._log('💰 PROFIT-LOCK $sym: Peaked at +\$${peakUsd.toStringAsFixed(2)}, banked +\$${plUsd.toStringAsFixed(2)} on pullback!', level: 'ok');
+        final res = await _forceCloseStockOrCrypto(ex, sym);
         unawaited(c._notifyOS('💰 Profit Locked: $sym (+\$${plUsd.toStringAsFixed(2)})', res.message));
         _peakPlUsd.remove(sym);
         _peakGainBps.remove(sym);
+        _entrySeenMs.remove(sym);
         peaksDirty = true;
         continue;
       }
 
-      // 3. The +$14 Break-Even Shield:
-      //    If position was up >= +$14 (or >= +0.16%) and fades down to <= +$3.50, close before it can ever turn red!
-      if ((peakUsd >= 14.0 || peakBps >= 16) && plUsd <= 3.50) {
-        c._log('🛡️ BREAK-EVEN SHIELD $sym: Peaked at +\$${peakUsd.toStringAsFixed(2)}, exited at +\$${plUsd.toStringAsFixed(2)} so winner never turns red!', level: 'ok');
-        final res = await c.closePosition(sym);
+      // 3. Never-Go-Red Break-Even Shield (Peaked >= +$9.50, faded to <= +$2.50):
+      if ((peakUsd >= 9.50 || peakBps >= 11) && plUsd <= 2.50) {
+        c._log('🛡️ BREAK-EVEN SHIELD $sym: Peaked at +\$${peakUsd.toStringAsFixed(2)}, exited at +\$${plUsd.toStringAsFixed(2)} before turning red!', level: 'ok');
+        final res = await _forceCloseStockOrCrypto(ex, sym);
         unawaited(c._notifyOS('🛡️ Break-Even Saved: $sym', res.message));
         _peakPlUsd.remove(sym);
         _peakGainBps.remove(sym);
+        _entrySeenMs.remove(sym);
         peaksDirty = true;
         continue;
       }
 
-      // 4. Tight Stop-Loss Guard (-0.68% or -$65 USD)
-      if (gainBps <= -68 || plUsd <= -65.0) {
+      // 4. Somes Timeline Rule (Audio 3):
+      //    - After 10 mins: if green (>= +$4.50), bank it immediately so it doesn't decay!
+      //    - After 18 mins: if stagnant (between -$28 and +$4.50), exit stale trade before it fails!
+      if (ageMin >= 10.0 && plUsd >= 4.50) {
+        c._log('⏱️ TIMELINE PROFIT EXIT $sym: Open ${ageMin.toStringAsFixed(0)}m, banking +\$${plUsd.toStringAsFixed(2)} before momentum fades!', level: 'ok');
+        final res = await _forceCloseStockOrCrypto(ex, sym);
+        unawaited(c._notifyOS('⏱️ Timeline Profit Banked: $sym (+\$${plUsd.toStringAsFixed(2)})', res.message));
+        _peakPlUsd.remove(sym);
+        _peakGainBps.remove(sym);
+        _entrySeenMs.remove(sym);
+        peaksDirty = true;
+        continue;
+      }
+      if (ageMin >= 18.0 && plUsd >= -28.0 && plUsd < 4.50) {
+        c._log('⏱️ TIMELINE STALE EXIT $sym: Open ${ageMin.toStringAsFixed(0)}m with no breakout (\$${plUsd.toStringAsFixed(2)}) — scratching trade!', level: 'warn');
+        final res = await _forceCloseStockOrCrypto(ex, sym);
+        unawaited(c._notifyOS('⏱️ Stale Trade Scratched: $sym', res.message));
+        _peakPlUsd.remove(sym);
+        _peakGainBps.remove(sym);
+        _entrySeenMs.remove(sym);
+        peaksDirty = true;
+        continue;
+      }
+
+      // 5. Tight Stop-Loss Guard (-0.52% or -$48 USD)
+      if (gainBps <= -52 || plUsd <= -48.0) {
         final n = (_stockLossBreach[sym] ?? 0) + 1;
         _stockLossBreach[sym] = n;
         if (n >= 2) {
           c._log('🚨 TIGHT STOP-LOSS $sym: Cut loss at \$${plUsd.toStringAsFixed(2)} (${(gainBps / 100).toStringAsFixed(2)}%) to protect capital.', level: 'error');
-          final res = await c.closePosition(sym);
+          final res = await _forceCloseStockOrCrypto(ex, sym);
           unawaited(c._notifyOS('🛡️ Tight Stop-Loss: $sym', res.message));
           _stockLossBreach.remove(sym);
           _peakPlUsd.remove(sym);
           _peakGainBps.remove(sym);
+          _entrySeenMs.remove(sym);
           peaksDirty = true;
         }
       } else {
@@ -273,6 +318,7 @@ class _CryptoGuardian {
 
     _peakPlUsd.removeWhere((k, _) => !activeSyms.contains(k));
     _peakGainBps.removeWhere((k, _) => !activeSyms.contains(k));
+    _entrySeenMs.removeWhere((k, _) => !activeSyms.contains(k));
     if (peaksDirty) _save();
   }
 
