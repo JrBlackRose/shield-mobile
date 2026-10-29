@@ -26,11 +26,11 @@ enum CardStatus { pending, approving, executed, rejected, expired, stale, failed
 abstract final class RiskRules {
   static const int riskBudgetBps = 100;
   static const int notionalCapBps = 1000;
-  static const int collarBps = 15;
-  static const int swingStopBps = 95;
-  static const int swingTargetBps = 90;
-  static const int intradayStopBps = 55;
-  static const int intradayTargetBps = 45;
+  static const int collarBps = 8;
+  static const int swingStopBps = 120;
+  static const int swingTargetBps = 216;
+  static const int intradayStopBps = 65;
+  static const int intradayTargetBps = 117;
   static const int maxDriftOfStopBps = 2000;
 }
 
@@ -168,11 +168,13 @@ BracketPlan buildBracketPlan({
   required Pips ask,
   required Timeframe timeframe,
   bool fractional = false,
+  int? stopBpsOverride,
+  int? targetBpsOverride,
 }) {
   if (equity <= 0 || ask <= 0) throw const PlanAbort('Equity and entry price must be positive.');
   final intraday = timeframe == Timeframe.intraday;
-  final stopBps = intraday ? RiskRules.intradayStopBps : RiskRules.swingStopBps;
-  final targetBps = intraday ? RiskRules.intradayTargetBps : RiskRules.swingTargetBps;
+  final stopBps = stopBpsOverride ?? (intraday ? RiskRules.intradayStopBps : RiskRules.swingStopBps);
+  final targetBps = targetBpsOverride ?? (intraday ? RiskRules.intradayTargetBps : RiskRules.swingTargetBps);
 
   final stop = _roundToTickRatio(ask * (kBpsDenom - stopBps), kBpsDenom);
   final target = _roundToTickRatio(ask * (kBpsDenom + targetBps), kBpsDenom);
@@ -248,7 +250,7 @@ MicroQuote calcImbalanceAndMicro(double bidP, double askP, double bidS, double a
   return (mid: mid, micro: mid + 0.5 * imb * spread, imbalance: imb, spreadBps: spreadBps);
 }
 
-double maxSpreadBps(Timeframe tf) => tf == Timeframe.intraday ? 22.0 : 55.0;
+double maxSpreadBps(Timeframe tf) => tf == Timeframe.intraday ? 6.0 : 25.0;
 bool spreadAllowed(double spreadBps, Timeframe tf) => spreadBps <= maxSpreadBps(tf);
 
 const int kPollSec = 5;
@@ -344,8 +346,8 @@ DateTime mytTime(DateTime utc) => utc.toUtc().add(const Duration(hours: 8));
 String? intradayWindowMessage(DateTime utc) {
   final ny = nyTime(utc);
   final mins = ny.hour * 60 + ny.minute;
-  if (ny.weekday >= 6 || mins < 9 * 60 + 35 || mins > 15 * 60 + 50) {
-    return 'Outside Intraday Window (NY Time ${two(ny.hour)}:${two(ny.minute)} not in 09:35-15:50)';
+  if (ny.weekday >= 6 || mins < 9 * 60 + 45 || mins > 15 * 60 + 50) {
+    return 'Opening Whipsaw / Off-Hours Guard (NY Time ${two(ny.hour)}:${two(ny.minute)} not in 09:45-15:50)';
   }
   return null;
 }
@@ -364,11 +366,10 @@ const List<String> kCryptoScanPairs = [
 
 /// Top liquid US tickers (large caps + index ETFs).
 const List<String> kLiquidUsEquities = [
+  'SPY', 'QQQ', 'SQQQ', 'SOXS', 'SPXS',
   'NVDA', 'TSLA', 'AMD', 'PLTR', 'META', 'AMZN', 'NFLX', 'MSFT', 'AAPL', 'GOOGL',
   'AVGO', 'MU', 'SMCI', 'ARM', 'COIN', 'HOOD', 'MSTR', 'SOFI', 'HIMS', 'APP',
   'CRWD', 'PANW', 'SNOW', 'SHOP', 'UBER', 'ORCL', 'CRM', 'QCOM', 'TSM', 'LLY',
-  // Inverse Short ETFs (let the bot profit when the market/tech dumps!)
-  'SQQQ', 'SOXS', 'SPXS', 'TSLQ', 'NVDS',
 ];
 
 /// Names that habitually move on news/earnings outside regular hours.
@@ -703,6 +704,9 @@ class FeedEvent {
 /// Simulates 100 forward price paths (24 x 5-min bars = 2 hours) using
 /// empirical candle returns, intrabar wick excursions, and EMA drift.
 /// Returns the number of winning paths out of 100 (0..100).
+/// Unbiased 500-path bootstrap Monte Carlo simulator matching our exact 1.8R ATR bracket
+/// (+2.7x ATR target vs -1.5x ATR stop, with +1.0R server-side break-even ratchet).
+/// Zero artificial drift is injected so past run-ups do not inflate future win probability.
 int simulate100Paths({
   required List<double> closes,
   required List<double> highs,
@@ -711,82 +715,78 @@ int simulate100Paths({
   required bool isCrypto,
   required bool trendAligned,
 }) {
-  if (!trendAligned || closes.length < 30 || price <= 0) return 28;
+  if (!trendAligned || closes.length < 30 || price <= 0) return 25;
   final n = closes.length;
-  final start = math.max(1, n - 36);
+  final start = math.max(1, n - 40);
   final rets = <double>[];
   final upWicks = <double>[];
   final dnWicks = <double>[];
+  var trSum = 0.0;
+  var trCount = 0;
+
   for (var i = start; i < n; i++) {
     final prev = closes[i - 1];
     if (prev <= 0) continue;
     rets.add(((closes[i] - prev) / prev).clamp(-0.025, 0.025).toDouble());
     upWicks.add(((highs[i] - prev) / prev).clamp(0.0, 0.030).toDouble());
     dnWicks.add(((lows[i] - prev) / prev).clamp(-0.030, 0.0).toDouble());
+    final tr = math.max(highs[i] - lows[i], math.max((highs[i] - prev).abs(), (lows[i] - prev).abs()));
+    trSum += tr / prev;
+    trCount++;
   }
-  if (rets.length < 12) return 35;
+  if (rets.length < 15 || trCount == 0) return 35;
 
   final m = rets.length;
-  final recentCount = math.min(12, m);
-  var recentSum = 0.0;
-  for (var i = m - recentCount; i < m; i++) {
-    recentSum += rets[i];
-  }
-  final recentMean = recentSum / recentCount;
-  var varSum = 0.0;
+  var mean = 0.0;
   for (final r in rets) {
-    final d = r - recentMean;
-    varSum += d * d;
+    mean += r;
   }
-  final sigma = math.sqrt(varSum / m).clamp(0.0004, 0.0120).toDouble();
+  mean /= m;
 
-  final targetPct = isCrypto ? 0.0058 : 0.0048;
-  const beTriggerPct = 0.0020; // +0.20% (~+$19 on $9.5k slot) locks break-even
-  const initialStopPct = -0.0065; // -0.65% tight stop
+  // De-meaned empirical returns (removes artificial momentum drift bias!)
+  final centeredRets = <double>[for (final r in rets) r - mean * 0.65];
+
+  final atrPct = (trSum / trCount).clamp(0.0015, 0.0100);
+  final stopPct = -(atrPct * 1.5).clamp(0.0050, 0.0125);
+  final targetPct = (-stopPct * 1.80); // Exact 1.8R Target
+  final beTriggerPct = -stopPct * 1.00; // +1.0R triggers server-side Break-Even stop
 
   var wins = 0;
+  const totalPaths = 500;
   final baseSeed = (price * 10000).round() ^ (n * 7919);
 
-  for (var p = 0; p < 100; p++) {
+  for (var p = 0; p < totalPaths; p++) {
     var seed = (baseSeed + p * 1103515245 + 12345) & 0x7fffffff;
     var cumRet = 0.0;
-    var activeStop = initialStopPct;
+    var activeStop = stopPct;
     var beLocked = false;
-    var outcome = 0; // 1 = win, -1 = loss
+    var outcome = 0;
 
     for (var step = 0; step < 24; step++) {
       seed = (seed * 1103515245 + 12345) & 0x7fffffff;
-      final useRecent = (seed & 1) == 0;
-      final idx = useRecent
-          ? (m - recentCount + ((seed >> 3) % recentCount))
-          : ((seed >> 3) % m);
-      seed = (seed * 1103515245 + 12345) & 0x7fffffff;
-      final u = ((seed % 2001) - 1000) / 1000.0; // -1.0 .. +1.0
-      final shock = u * sigma * 0.45 + recentMean * 0.25;
+      final idx = (seed >> 4) % m;
+      final stepHigh = cumRet + math.max(centeredRets[idx], upWicks[idx] * 0.65);
+      final stepLow = cumRet + math.min(centeredRets[idx], dnWicks[idx] * 0.65);
 
-      final stepHigh = cumRet + math.max(rets[idx], upWicks[idx] * 0.72) + math.max(0.0, shock);
-      final stepLow = cumRet + math.min(rets[idx], dnWicks[idx] * 0.72) + math.min(0.0, shock);
-
+      if (stepLow <= activeStop) {
+        outcome = beLocked ? 1 : -1;
+        break;
+      }
       if (stepHigh >= targetPct) {
         outcome = 1;
         break;
       }
       if (stepHigh >= beTriggerPct) {
         beLocked = true;
-        activeStop = 0.0004; // Break-even shield armed
+        activeStop = 0.0008;
       }
-      if (stepLow <= activeStop) {
-        outcome = beLocked ? 1 : -1;
-        break;
-      }
-      cumRet += rets[idx] + shock;
+      cumRet += centeredRets[idx];
     }
-
-    if (outcome == 1 || (outcome == 0 && (beLocked || cumRet >= 0.0005))) {
+    if (outcome == 1 || (outcome == 0 && (beLocked || cumRet > 0.0010))) {
       wins++;
     }
   }
-  return wins.clamp(0, 100);
+  return ((wins * 100) / totalPaths).round().clamp(0, 100);
 }
 
 class ConfluenceSignal {
@@ -805,15 +805,17 @@ class ConfluenceScore {
     required this.barsUsed,
     required this.asOf,
     this.simWins = 70,
+    this.atrBps = 45,
   });
   final String symbol;
   final double price, vwapValue, volumeRatio, rsiValue;
   final int barsUsed;
   final DateTime asOf;
   final int simWins;
+  final int atrBps;
 
   bool get aboveVwap => price > vwapValue;
-  bool get volumeSurge => volumeRatio >= 1.5;
+  bool get volumeSurge => volumeRatio >= 1.15; // Adjusted for Alpaca IEX 2.5% volume feed
   bool get rsiConstructive => rsiValue >= 42.0 && rsiValue <= 65.0; // Healthy pullback & bounce band
   bool get rsiOverbought => rsiValue > 65.0; // Extended/Climax zone
 

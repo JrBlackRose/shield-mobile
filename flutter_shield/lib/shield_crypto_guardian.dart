@@ -79,8 +79,8 @@ class _CryptoGuardian {
   final Map<String, int> _breach = <String, int>{};
   final Map<String, double> _peakPlUsd = <String, double>{};
   final Map<String, int> _peakGainBps = <String, int>{};
-  final Map<String, int> _stockLossBreach = <String, int>{};
-  final Map<String, int> _entrySeenMs = <String, int>{};
+  
+  
   bool _busy = false, _loaded = false;
   DateTime _lastRun = DateTime.fromMillisecondsSinceEpoch(0, isUtc: true);
   String? _lastErr;
@@ -193,133 +193,77 @@ class _CryptoGuardian {
     }
   }
 
-  Future<({bool ok, String message})> _forceCloseStockOrCrypto(_AlpacaExtras ex, String sym) async {
-    for (final o in c._rawOrders) {
-      final oSym = normSym('${o['symbol'] ?? ''}');
-      final st = '${o['status'] ?? ''}'.toLowerCase();
-      if (oSym == sym && st != 'canceled' && st != 'filled' && st != 'expired' && st != 'rejected') {
-        try {
-          await ex.cancelOrderById('${o['id']}');
-        } catch (_) {}
-      }
-    }
-    await Future<void>.delayed(const Duration(milliseconds: 650));
-    return c.closePosition(sym);
-  }
-
-  Future<void> _runSomesAutoCashout() async {
+    Future<void> _runSomesAutoCashout() async {
+    // SERVER-SIDE STOP RATCHET FOR US EQUITIES:
+    // Never cancels bracket orders or chokes winners early!
+    // Instead, modifies the live stop-loss leg directly on Alpaca's servers
+    // once a stock reaches +1.0R (Break-Even lock) or +1.4R (+0.8R trail lock).
     final ex = c._extras();
-    final nowMs = DateTime.now().toUtc().millisecondsSinceEpoch;
-    final activeSyms = <String>{};
-    var peaksDirty = false;
-
     for (final p in c.positions) {
       if (!p.isLong || p.avgEntry <= 0 || p.currentPrice <= 0 || p.qtyDouble <= 0) continue;
       final sym = normSym(p.symbol);
-      activeSyms.add(sym);
-      if (c._closing.contains(sym)) continue;
-      final isCrypto = isCryptoSymbol(sym);
-      if (!isCrypto && !c.sessionOpen) continue;
+      if (isCryptoSymbol(sym) || c._closing.contains(sym)) continue;
 
-      final firstMs = _entrySeenMs.putIfAbsent(sym, () => nowMs);
-      final ageMin = (nowMs - firstMs) / 60000.0;
-
-      final plUsd = p.unrealizedPl / kPipsPerUsd;
       final gainBps = ((p.currentPrice - p.avgEntry) * kBpsDenom) ~/ p.avgEntry;
-
-      final prevPeakUsd = _peakPlUsd[sym] ?? plUsd;
       final prevPeakBps = _peakGainBps[sym] ?? gainBps;
-      final peakUsd = math.max(prevPeakUsd, plUsd);
       final peakBps = math.max(prevPeakBps, gainBps);
-      if (peakUsd > prevPeakUsd || peakBps > prevPeakBps || !_peakPlUsd.containsKey(sym)) {
-        _peakPlUsd[sym] = peakUsd;
+      if (peakBps > prevPeakBps || !_peakGainBps.containsKey(sym)) {
         _peakGainBps[sym] = peakBps;
-        peaksDirty = true;
+        _save();
       }
 
-      // 1. Somes Quick-Scalp Cashout (+$22 USD or +0.25%): Take quick profit immediately!
-      if (plUsd >= 22.0 || gainBps >= 25) {
-        c._log('💰 QUICK-SCALP CASHOUT $sym: Banked +\$${plUsd.toStringAsFixed(2)} (+${(gainBps / 100).toStringAsFixed(2)}%) immediately!', level: 'ok');
-        final res = await _forceCloseStockOrCrypto(ex, sym);
-        unawaited(c._notifyOS('💰 Quick Scalp Banked: $sym (+\$${plUsd.toStringAsFixed(2)})', res.message));
-        _peakPlUsd.remove(sym);
-        _peakGainBps.remove(sym);
-        _entrySeenMs.remove(sym);
-        peaksDirty = true;
-        continue;
-      }
-
-      // 2. Peak-Pullback Lock (Peaked >= +$13, pulled back 30% while still >= +$5):
-      if ((peakUsd >= 13.0 || peakBps >= 14) && plUsd >= 5.0 && plUsd <= peakUsd * 0.70) {
-        c._log('💰 PROFIT-LOCK $sym: Peaked at +\$${peakUsd.toStringAsFixed(2)}, banked +\$${plUsd.toStringAsFixed(2)} on pullback!', level: 'ok');
-        final res = await _forceCloseStockOrCrypto(ex, sym);
-        unawaited(c._notifyOS('💰 Profit Locked: $sym (+\$${plUsd.toStringAsFixed(2)})', res.message));
-        _peakPlUsd.remove(sym);
-        _peakGainBps.remove(sym);
-        _entrySeenMs.remove(sym);
-        peaksDirty = true;
-        continue;
-      }
-
-      // 3. Never-Go-Red Break-Even Shield (Peaked >= +$9.50, faded to <= +$2.50):
-      if ((peakUsd >= 9.50 || peakBps >= 11) && plUsd <= 2.50) {
-        c._log('🛡️ BREAK-EVEN SHIELD $sym: Peaked at +\$${peakUsd.toStringAsFixed(2)}, exited at +\$${plUsd.toStringAsFixed(2)} before turning red!', level: 'ok');
-        final res = await _forceCloseStockOrCrypto(ex, sym);
-        unawaited(c._notifyOS('🛡️ Break-Even Saved: $sym', res.message));
-        _peakPlUsd.remove(sym);
-        _peakGainBps.remove(sym);
-        _entrySeenMs.remove(sym);
-        peaksDirty = true;
-        continue;
-      }
-
-      // 4. Somes Timeline Rule (Audio 3):
-      //    - After 10 mins: if green (>= +$4.50), bank it immediately so it doesn't decay!
-      //    - After 18 mins: if stagnant (between -$28 and +$4.50), exit stale trade before it fails!
-      if (ageMin >= 10.0 && plUsd >= 4.50) {
-        c._log('⏱️ TIMELINE PROFIT EXIT $sym: Open ${ageMin.toStringAsFixed(0)}m, banking +\$${plUsd.toStringAsFixed(2)} before momentum fades!', level: 'ok');
-        final res = await _forceCloseStockOrCrypto(ex, sym);
-        unawaited(c._notifyOS('⏱️ Timeline Profit Banked: $sym (+\$${plUsd.toStringAsFixed(2)})', res.message));
-        _peakPlUsd.remove(sym);
-        _peakGainBps.remove(sym);
-        _entrySeenMs.remove(sym);
-        peaksDirty = true;
-        continue;
-      }
-      if (ageMin >= 18.0 && plUsd >= -28.0 && plUsd < 4.50) {
-        c._log('⏱️ TIMELINE STALE EXIT $sym: Open ${ageMin.toStringAsFixed(0)}m with no breakout (\$${plUsd.toStringAsFixed(2)}) — scratching trade!', level: 'warn');
-        final res = await _forceCloseStockOrCrypto(ex, sym);
-        unawaited(c._notifyOS('⏱️ Stale Trade Scratched: $sym', res.message));
-        _peakPlUsd.remove(sym);
-        _peakGainBps.remove(sym);
-        _entrySeenMs.remove(sym);
-        peaksDirty = true;
-        continue;
-      }
-
-      // 5. Tight Stop-Loss Guard (-0.52% or -$48 USD)
-      if (gainBps <= -52 || plUsd <= -48.0) {
-        final n = (_stockLossBreach[sym] ?? 0) + 1;
-        _stockLossBreach[sym] = n;
-        if (n >= 2) {
-          c._log('🚨 TIGHT STOP-LOSS $sym: Cut loss at \$${plUsd.toStringAsFixed(2)} (${(gainBps / 100).toStringAsFixed(2)}%) to protect capital.', level: 'error');
-          final res = await _forceCloseStockOrCrypto(ex, sym);
-          unawaited(c._notifyOS('🛡️ Tight Stop-Loss: $sym', res.message));
-          _stockLossBreach.remove(sym);
-          _peakPlUsd.remove(sym);
-          _peakGainBps.remove(sym);
-          _entrySeenMs.remove(sym);
-          peaksDirty = true;
+      // Find the active server-side stop-loss order for this stock
+      Map<String, dynamic>? stopLeg;
+      for (final o in c._rawOrders) {
+        final oSym = normSym('${o['symbol'] ?? ''}');
+        final side = '${o['side'] ?? ''}'.toLowerCase();
+        final type = '${o['type'] ?? o['order_type'] ?? ''}'.toLowerCase();
+        final st = '${o['status'] ?? ''}'.toLowerCase();
+        if (oSym == sym && side == 'sell' && type.contains('stop') &&
+            st != 'canceled' && st != 'filled' && st != 'expired' && st != 'rejected') {
+          stopLeg = o;
+          break;
         }
-      } else {
-        _stockLossBreach.remove(sym);
+      }
+      if (stopLeg == null) continue;
+
+      final curStop = tryPips(stopLeg['stop_price']) ?? 0;
+      if (curStop <= 0) continue;
+
+      // Estimate 1R from initial stop distance (or 65 bps fallback)
+      final initialRiskBps = curStop < p.avgEntry
+          ? (((p.avgEntry - curStop) * kBpsDenom) ~/ p.avgEntry).clamp(45, 130)
+          : 65;
+
+      Pips desiredStop = 0;
+      String note = '';
+      if (peakBps >= (initialRiskBps * 14 ~/ 10)) {
+        // Reached +1.4R -> Lock +0.8R profit on Alpaca's server!
+        final lockBps = initialRiskBps * 8 ~/ 10;
+        desiredStop = roundToTick(p.avgEntry * (kBpsDenom + lockBps) ~/ kBpsDenom);
+        note = '+0.8R server profit-lock';
+      } else if (peakBps >= initialRiskBps) {
+        // Reached +1.0R -> Lock Break-Even + 10 bps on Alpaca's server!
+        desiredStop = roundToTick(p.avgEntry * (kBpsDenom + 10) ~/ kBpsDenom);
+        note = '+1.0R server break-even lock';
+      }
+
+      final maxAllowedStop = roundToTick(p.currentPrice * (kBpsDenom - 15) ~/ kBpsDenom);
+      if (desiredStop > 0) {
+        desiredStop = math.min(desiredStop, maxAllowedStop);
+      }
+
+      if (desiredStop > curStop + (p.avgEntry * 8 ~/ kBpsDenom)) {
+        try {
+          await ex.replaceStop(
+            orderId: '${stopLeg['id']}',
+            stop: desiredStop,
+            limit: desiredStop,
+          );
+          c._log('🛡️ SERVER RATCHET $sym: Moved Alpaca Stop-Loss ${priceStr(curStop)} → ${priceStr(desiredStop)} ($note)', level: 'ok', notify: false);
+        } catch (_) {}
       }
     }
-
-    _peakPlUsd.removeWhere((k, _) => !activeSyms.contains(k));
-    _peakGainBps.removeWhere((k, _) => !activeSyms.contains(k));
-    _entrySeenMs.removeWhere((k, _) => !activeSyms.contains(k));
-    if (peaksDirty) _save();
   }
 
   Future<void> _protect(_AlpacaExtras ex, String sym, Position p, DateTime now) async {

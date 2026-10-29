@@ -103,7 +103,7 @@ abstract final class DataRules {
 }
 
 abstract final class UpdateRules {
-  static const String currentVersion = '7.0.0';
+  static const String currentVersion = '7.2.0';
   static const String versionUrl =
       'https://raw.githubusercontent.com/JrBlackRose/shield-mobile/main/version.json';
   static const Duration minInterval = Duration(hours: 6);
@@ -197,8 +197,6 @@ ConfluenceScore? computeConfluence({
 }) {
   if (price <= 0 || candles.isEmpty) return null;
   final done = List<Candle>.of(candles);
-  // The newest bar may still be forming while the market is open: its partial
-  // volume would understate the ratio, so only completed bars are used.
   if (marketOpen && done.last.t.add(const Duration(minutes: ConfluenceRules.barMinutes)).isAfter(nowUtc)) {
     done.removeLast();
   }
@@ -207,22 +205,38 @@ ConfluenceScore? computeConfluence({
 
   final last = done.last;
   final crypto = isCryptoSymbol(symbol);
-  List<Candle> session;
-  if (crypto) {
-    final from = last.t.subtract(const Duration(hours: 24));
-    session = done.where((c) => !c.t.isBefore(from)).toList();
-  } else {
-    final day = _nyDayKey(last.t);
-    if (marketOpen && day != _nyDayKey(nowUtc)) return null; // no completed bar yet today
-    session = done.where((c) {
-      final n = nyTime(c.t);
-      final m = n.hour * 60 + n.minute;
-      return _nyDayKey(c.t) == day && m >= 570 && m < 960;
-    }).toList();
-    if (session.isEmpty) session = done.where((c) => _nyDayKey(c.t) == day).toList();
-  }
+  final window = crypto
+      ? (done.length > 288 ? done.sublist(done.length - 288) : done)
+      : () {
+          final day = _nyDayKey(last.t);
+          final session = done.where((b) => _nyDayKey(b.t) == day).toList();
+          return session.length >= 3 ? session : done.sublist(math.max(0, done.length - 30));
+        }();
 
-  final closes = done.map((c) => c.c).toList();
+  final vwap = sessionVwap(window);
+  final vols = done.map((b) => b.v).toList();
+  final closes = done.map((b) => b.c).toList();
+  final highs = done.map((b) => b.h).toList();
+  final lows = done.map((b) => b.l).toList();
+
+  final nonZeroPrior = vols.sublist(vols.length - ConfluenceRules.volAvgBars - 1, vols.length - 1).where((v) => v > 0).toList()..sort();
+  final med = nonZeroPrior.isEmpty ? 0.0 : nonZeroPrior[nonZeroPrior.length ~/ 2];
+  final recentVol = math.max(vols.last, vols[vols.length - 2]);
+  final vr = med > 0 ? recentVol / med : null;
+  final rsi = wilderRsi(closes, period: ConfluenceRules.rsiPeriod);
+  if (vwap == null || vr == null || rsi == null) return null;
+
+  // Compute 14-bar 5-minute ATR in basis points (bps)
+  var trSum = 0.0;
+  final atrStart = math.max(1, done.length - 14);
+  for (var i = atrStart; i < done.length; i++) {
+    final prevC = closes[i - 1];
+    final tr = math.max(highs[i] - lows[i], math.max((highs[i] - prevC).abs(), (lows[i] - prevC).abs()));
+    if (prevC > 0) trSum += tr / prevC;
+  }
+  final atrPct = trSum / (done.length - atrStart);
+  final atrBps = (atrPct * 10000).round().clamp(25, 110);
+
   double ema(List<double> vals, int period) {
     final k = 2.0 / (period + 1);
     var e = vals.first;
@@ -233,40 +247,29 @@ ConfluenceScore? computeConfluence({
   }
   final ema9 = ema(closes, 9);
   final ema21 = ema(closes, 21);
-  final range = last.h - last.l;
-  final bodyBottom = math.min(last.o, last.c);
-  final lowerWick = bodyBottom - last.l;
-  final bounceCandle = range > 0 && (last.c >= last.o || (lowerWick / range) >= 0.25);
-  final notOverextended = ((price - ema9) / price) <= 0.0060; // Within 0.60% above EMA9, not chasing a spike
-  final greenIgnition = last.c > last.o && closes.length >= 3 && last.c >= closes[closes.length - 2];
-  final trendAligned = !crypto && greenIgnition && ema9 >= ema21 && price >= ema9 * 0.998 && bounceCandle && notOverextended;
+  final greenOrBounce = last.c >= last.o || ((math.min(last.o, last.c) - last.l) / math.max(0.0001, last.h - last.l)) >= 0.30;
+  final notOverextended = ((price - ema9) / price) <= (atrPct * 1.6);
+  final trendAligned = ema9 >= ema21 * 0.999 && price > vwap && greenOrBounce && notOverextended && rsi >= 44.0 && rsi <= 65.0;
 
-  final vwap = sessionVwap(session);
-  final vr = volumeRatio(done.map((c) => c.v).toList(), avgBars: ConfluenceRules.volAvgBars);
-  var rsi = wilderRsi(closes, period: ConfluenceRules.rsiPeriod);
-  if (vwap == null || vr == null || rsi == null) return null;
-
-  if (!trendAligned) {
-    // Hard gate: force < 2/3 points so breakout spikes with VWAP + Volume cannot sneak past triggerTrade
-    rsi = 38.0;
-  }
   final simWins = simulate100Paths(
     closes: closes,
-    highs: done.map((b) => b.h).toList(),
-    lows: done.map((b) => b.l).toList(),
+    highs: highs,
+    lows: lows,
     price: price,
     isCrypto: crypto,
     trendAligned: trendAligned,
   );
+
   return ConfluenceScore(
     symbol: symbol,
     price: price,
-    vwapValue: trendAligned ? vwap : price * 1.01,
+    vwapValue: vwap,
     volumeRatio: vr,
     rsiValue: rsi,
     barsUsed: done.length,
     asOf: last.t,
-    simWins: simWins,
+    simWins: trendAligned ? simWins : math.min(simWins, 45),
+    atrBps: atrBps,
   );
 }
 
@@ -1471,13 +1474,40 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
       if (candidates.isEmpty) return; // nothing ready yet: do NOT start the interval, retry next poll
       _lastAutoScanAt = nowUtc; // only after the candidate pool is ready
       // Pre-screen candidates with the quantitative Pullback Sniper so we never get stuck on BTCUSD alone!
+      // 1. Check SPY Market Regime first so we never buy long tech into a market dump!
+      var spyBullish = true;
+      try {
+        final spyQ = await _liveQuote('SPY');
+        if (spyQ.ask > 0) {
+          final spyConf = await _computeConfluence('SPY', spyQ.ask, live: true);
+          if (spyConf != null) {
+            spyBullish = spyConf.aboveVwap && spyConf.rsiValue >= 46.0;
+          }
+        }
+      } catch (_) {}
+
+      const bearEtfs = {'SQQQ', 'SOXS', 'SPXS', 'TSLQ', 'NVDS'};
+      final newsSyms = <String>{
+        for (final n in feed)
+          if (n.sentiment >= 0.78) ...n.symbols.map(normSym),
+      };
+
+      final filteredPool = candidates.where((sym) {
+        if (spyBullish) {
+          return !bearEtfs.contains(sym); // Bullish market: skip inverse bear ETFs
+        } else {
+          // Bearish market (SPY < VWAP): ONLY trade Inverse Bear ETFs or Tier-1 News Catalysts!
+          return bearEtfs.contains(sym) || newsSyms.contains(sym);
+        }
+      }).toList();
+
       final scoredPairs = <({String sym, int sim})>[];
-      for (final sym in candidates.take(10)) {
+      for (final sym in filteredPool.take(24)) {
         try {
           final qs = await _liveQuote(sym);
           if (qs.ask <= 0) continue;
           final cScore = await _computeConfluence(sym, qs.ask, live: _resolveVenue(sym) != VenueKind.closed);
-          if (cScore != null && cScore.points >= 2 && cScore.simWins >= 62) {
+          if (cScore != null && cScore.points >= 2 && cScore.simWins >= 58) {
             scoredPairs.add((sym: sym, sim: cScore.simWins));
           }
         } catch (_) {}
@@ -1485,7 +1515,7 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
       scoredPairs.sort((a, b) => b.sim.compareTo(a.sim));
       final passing = scoredPairs.map((e) => e.sym).toList();
       if (passing.isEmpty) {
-        _log('🎲 Scout simulated ${candidates.take(10).length} tickers (100 paths each) — 0 achieved ≥62% win probability this round.', level: 'info', notify: false);
+        _log('🎲 Scout checked ${filteredPool.take(24).length} tickers (SPY regime: ${spyBullish ? "BULL ▲" : "BEAR ▼"}) — 0 passed 1.8R ATR & Sim gate.', level: 'info', notify: false);
         return;
       }
       String? pick;
@@ -1743,6 +1773,7 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
       }
       final BracketPlan plan;
       CryptoPlan? cplan;
+            final conf = await _computeConfluence(sym, qs.ask, live: _resolveVenue(sym) != VenueKind.closed);
       if (crypto) {
         final vol = await _guardian.volFor(sym, fresh: true);
         if (vol == null) throw PlanAbort('Not enough bar history to measure $sym volatility. Trade aborted.');
@@ -1755,18 +1786,26 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
         );
         plan = cplan.plan;
       } else {
-        plan = buildBracketPlan(equity: acct.equity, ask: qs.ask, timeframe: timeframe);
+        final atrBps = conf?.atrBps ?? 45;
+        final stopBps = (atrBps * 15 ~/ 10).clamp(50, 125); // 1.5x ATR Stop (0.50% .. 1.25%)
+        final targetBps = (stopBps * 18 ~/ 10);             // 2.7x ATR Target (Exact 1.8R Reward/Risk!)
+        plan = buildBracketPlan(
+          equity: acct.equity,
+          ask: qs.ask,
+          timeframe: timeframe,
+          stopBpsOverride: stopBps,
+          targetBpsOverride: targetBps,
+        );
       }
-      final conf = await _computeConfluence(sym, qs.ask, live: _resolveVenue(sym) != VenueKind.closed);
       if (conf != null) {
         lastConfluence = conf;
         _log('📊 $sym ${conf.summary}', notify: false);
       }
 
       // Hard Quantitative Confluence + 100-Path Monte Carlo Gate: require >= 2/3 AND >= 62/100 paths
-      if (!offHours && !qs.fromSnapshot && (conf == null || conf.points < 2 || conf.simWins < 62)) {
+      if (!offHours && !qs.fromSnapshot && (conf == null || conf.points < 2 || conf.simWins < 58)) {
         throw RiskReject(
-          'Confluence ${conf?.points ?? 0}/3 · 100-Path Sim ${conf?.simWins ?? 0}/100 (requires ≥ 2/3 & ≥ 62/100 win paths). Trade blocked for $sym.',
+          'Confluence ${conf?.points ?? 0}/3 · 100-Path Sim ${conf?.simWins ?? 0}/100 (requires ≥ 2/3 & ≥ 58/100 1.8R paths). Trade blocked for $sym.',
         );
       }
 
