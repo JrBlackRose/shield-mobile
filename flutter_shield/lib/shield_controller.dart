@@ -239,7 +239,7 @@ ConfluenceScore? computeConfluence({
   final bounceCandle = range > 0 && (last.c >= last.o || (lowerWick / range) >= 0.25);
   final notOverextended = ((price - ema9) / price) <= 0.0060; // Within 0.60% above EMA9, not chasing a spike
   final greenIgnition = last.c > last.o && closes.length >= 3 && last.c >= closes[closes.length - 2];
-  final trendAligned = !crypto && greenIgnition && ema9 >= ema21 && price > vwap && rsi >= 50.0 && rsi <= 65.0;
+  final trendAligned = !crypto && greenIgnition && ema9 >= ema21 && price >= ema9 * 0.998 && bounceCandle && notOverextended;
 
   final vwap = sessionVwap(session);
   final vr = volumeRatio(done.map((c) => c.v).toList(), avgBars: ConfluenceRules.volAvgBars);
