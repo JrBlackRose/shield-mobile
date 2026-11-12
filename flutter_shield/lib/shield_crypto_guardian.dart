@@ -83,7 +83,7 @@ class _CryptoGuardian {
   
   bool _busy = false, _loaded = false;
   DateTime _lastRun = DateTime.fromMillisecondsSinceEpoch(0, isUtc: true);
-  String? _lastErr;
+  final Map<String, String?> _lastErr = <String, String?>{};
 
   void _loadOnce() {
     if (_loaded) return;
@@ -182,8 +182,8 @@ class _CryptoGuardian {
           await _protect(ex, e.key, e.value, now);
         } catch (err) {
           final msg = c._errText(err);
-          if (_lastErr != msg) {
-            _lastErr = msg;
+          if (_lastErr[e.key] != msg) {
+            _lastErr[e.key] = msg;
             c._log('🛡️ GUARDIAN ${e.key}:$msg', level: 'warn', notify: false);
           }
         }
@@ -296,7 +296,7 @@ class _CryptoGuardian {
       if (status == 'canceled' || status == 'expired' || status == 'rejected' || status == 'pending_cancel') {
         continue;
       }
-      if ('${o['side']}' == 'sell' && type == 'stop_limit' && normSym('${o['symbol']}') == sym) {
+      if ('${o['side']}' == 'sell' && (type == 'stop' || type == 'stop_limit') && normSym('${o['symbol']}') == sym) {
         stopOrder = o;
         break;
       }
