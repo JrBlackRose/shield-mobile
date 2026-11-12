@@ -319,8 +319,8 @@ class _CryptoGuardian {
     final qtyTxt = floorQtyText(p.qtyDouble);
     final targetQty = double.tryParse(qtyTxt) ?? 0.0;
     if (targetQty <= 0.0) return;
-    // Let trailing stop work; only hard-harvest crypto on a >= +4.2% (>2R) surge
-    if (p.avgEntry > 0 && last >= (p.avgEntry * 10145 ~/ 10000)) {
+    // Let trailing stop work; only hard-harvest crypto at the +1.45% guardian target.
+    if (p.avgEntry > 0 && last >= (p.avgEntry * (kBpsDenom + CryptoRules.hardTargetBps) ~/ kBpsDenom)) {
       c._log('💰 GUARDIAN banking +1.45% crypto target on $sym (+${((last - p.avgEntry) / p.avgEntry * 100).toStringAsFixed(2)}%)', level: 'ok');
       final res = await c.closePosition(sym);
       unawaited(c._notifyOS('💰 Crypto Surge Banked: $sym', res.message));

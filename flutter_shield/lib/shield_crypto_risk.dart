@@ -46,6 +46,7 @@ abstract final class CryptoRules {
   static const double minStepAtrFrac = 0.18;
   static const int minStopGapBps = 45; // Keep stop at least 45 bps below live price
   static const double refTargetR = 2.2; // Positive expectancy R target
+  static const int hardTargetBps = 145; // Guardian hard-harvest target (+1.45%)
 }
 
 double? wilderAtr(List<CryptoBar> bars, {int period = 14}) {
@@ -182,6 +183,16 @@ CryptoPlan buildCryptoPlan({
   var stopPct = math.max(CryptoRules.kAtr * vol.atr1hPct, CryptoRules.kSigma * vol.sigmaHorizonPct);
   stopPct = stopPct.clamp(CryptoRules.stopFloorBps / kBpsDenom, CryptoRules.stopCeilBps / kBpsDenom).toDouble();
   final stopBps = (stopPct * kBpsDenom).round();
+
+  // The guardian hard-harvests crypto at +1.45%. If the initial stop is at or
+  // beyond that target, the trade is sub-1R by construction. Reject it rather
+  // than silently letting the MC gate (calibrated to 1.8R) approve it.
+  if (stopBps >= CryptoRules.hardTargetBps) {
+    throw RiskReject(
+      'Crypto stop ${(stopBps / 100).toStringAsFixed(2)}% is at/beyond the '
+      '+${(CryptoRules.hardTargetBps / 100).toStringAsFixed(2)}% guardian target (sub-1R). Entry skipped.',
+    );
+  }
 
   final collar = limitCollarPrice(ask);
   final stop = roundToTick(ask * (kBpsDenom - stopBps) ~/ kBpsDenom);
