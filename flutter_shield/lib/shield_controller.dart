@@ -1131,9 +1131,18 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
       for (final o in _rawOrders) {
         final st = '${o['status'] ?? ''}'.toLowerCase();
         if (st == 'canceled' || st == 'expired' || st == 'rejected') continue;
-        if (normSym('${o['symbol'] ?? ''}') == sym && '${o['side']}' == 'sell') {
-          if (tryPips(o['stop_price']) != null) hasActiveStop = true;
+        if (normSym('${o['symbol'] ?? ''}') == sym) {
           if ('${o['time_in_force'] ?? ''}'.toLowerCase() == 'day') hasExpiringDayLeg = true;
+          if ('${o['side']}' == 'sell' && tryPips(o['stop_price']) != null) hasActiveStop = true;
+          final legs = o['legs'];
+          if (legs is List) {
+            for (final l in legs.whereType<Map>()) {
+              if ('${l['side']}' == 'sell' &&
+                  '${l['time_in_force'] ?? ''}'.toLowerCase() == 'day') {
+                hasExpiringDayLeg = true;
+              }
+            }
+          }
         }
       }
 
@@ -1722,6 +1731,54 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
   // Trade staging
   // ==========================================================================
 
+  /// Shared pre-submit guard mirroring server.py's check_existing_position:
+  /// reject a new entry if the symbol already has an open position, an open
+  /// order, or a queued order. Both triggerTrade and approveCard use this.
+  Future<void> _guardNoExistingExposure(String sym) async {
+    final s = normSym(sym);
+    if (_positionFor(s) != null) {
+      throw RiskReject('$s already has an open position. Duplicate entries are blocked.');
+    }
+    final hasCachedOrder = _rawOrders.any((o) {
+      if (normSym('${o['symbol'] ?? ''}') != s) return false;
+      final status = '${o['status'] ?? ''}'.toLowerCase();
+      return status != 'canceled' &&
+          status != 'expired' &&
+          status != 'rejected' &&
+          status != 'filled';
+    });
+    if (hasCachedOrder || queuedSymbols.contains(s)) {
+      throw RiskReject('$s already has an open or queued order. Duplicate entries are blocked.');
+    }
+
+    // Live check, matching the intent of Python's check_existing_position.
+    final cl = client;
+    if (cl == null) throw const PlanAbort('Connect your Alpaca keys first.');
+    try {
+      final livePositions = await cl.getPositions();
+      final liveOrders = await cl.getOpenOrders();
+      final hasPosition = livePositions.any((p) => normSym('${p['symbol'] ?? ''}') == s);
+      final hasOrder = liveOrders.any((o) {
+        if (normSym('${o['symbol'] ?? ''}') != s) return false;
+        final status = '${o['status'] ?? ''}'.toLowerCase();
+        return status != 'canceled' &&
+            status != 'expired' &&
+            status != 'rejected' &&
+            status != 'filled';
+      });
+      if (hasPosition) {
+        throw RiskReject('$s already has an open position. Duplicate entries are blocked.');
+      }
+      if (hasOrder) {
+        throw RiskReject('$s already has an open or queued order. Duplicate entries are blocked.');
+      }
+    } on RiskReject {
+      rethrow;
+    } catch (e) {
+      throw PlanAbort('Could not verify existing positions/orders for $s: ${_errText(e)}');
+    }
+  }
+
   /// [forceStage] guarantees an approval card even in AUTO (used by the Copilot).
   /// [autoOnly] is for background entries (scout / news trigger): if the entry
   /// cannot be auto-executed it is dropped — no card is staged and the chart view
@@ -1746,6 +1803,7 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
       if (autoOnly && (executionMode != ExecMode.auto || autoLockReason != null)) {
         throw const RiskReject('Auto-only entry skipped: AUTO is off or locked.');
       }
+      await _guardNoExistingExposure(sym);
       final acct = await _accountGuard();
       final crypto = isCryptoSymbol(sym);
       final offHours = allowOffHoursStaging && !crypto; // the toggle only matters for stocks
@@ -1983,6 +2041,8 @@ class ShieldController extends ChangeNotifier with WidgetsBindingObserver {
     notifyListeners();
     try {
       if (client == null) throw const PlanAbort('Not connected.');
+      // 0. Shared duplicate-exposure guard (position, open order, or queued order).
+      await _guardNoExistingExposure(card.ticker);
       // 1. Price-drift guard against a fresh ask (snapshot price when closed + off-hours card).
       final qs = await _liveQuote(card.ticker);
       try {

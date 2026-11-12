@@ -1119,10 +1119,12 @@ class AlpacaClient {
   }
 
   /// Crypto orders cannot use `day`; they must be `gtc` (or `ioc`).
+  /// Non-crypto intraday orders must be `day` so the EOD flatten can see them;
+  /// swing orders remain `gtc`.
   String _tif(String symbol, Timeframe timeframe) {
-  if (isCryptoSymbol(symbol)) return 'gtc';
-  return 'gtc';
-}
+    if (isCryptoSymbol(symbol)) return 'gtc';
+    return timeframe == Timeframe.intraday ? 'day' : 'gtc';
+  }
 
   /// Plain collared limit-buy entry (no bracket legs). Used for crypto, where
   /// Alpaca does not accept bracket orders.
