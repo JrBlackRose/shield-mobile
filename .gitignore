@@ -1,0 +1,39 @@
+# Secrets / local environment
+.env
+.env.*
+!.env.example
+venv/
+.venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.pytest_cache/
+
+# Local data / logs
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.db-wal
+*.db-shm
+*.log
+*.zip
+
+# Tooling / generated output
+tree_map.txt
+cloudflared
+build/
+dist/
+.dart_tool/
+precision_audit_chart.png
+*.apk
+*.aab
+
+# OS/editor noise
+.DS_Store

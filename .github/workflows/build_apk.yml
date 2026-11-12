@@ -5,6 +5,8 @@ jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
+      # Write is required only by the keystore self-heal block below
+      # (git commit/push to main). Read-only would break that fallback.
       contents: write
     steps:
       - uses: actions/checkout@v4
