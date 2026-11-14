@@ -37,3 +37,4 @@ precision_audit_chart.png
 
 # OS/editor noise
 .DS_Store
+engine_state.json
