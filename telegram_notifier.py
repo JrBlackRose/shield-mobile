@@ -53,8 +53,7 @@ def _format_plan(ticker: str, plan: dict[str, Any]) -> str:
     )
 
 async def _call_api(path: str) -> tuple[bool, str]:
-    # HARDCODED TOKEN
-    headers = {"x-shield-auth": "secure_shield_key_2026"}
+    headers = {"x-shield-auth": _env("SHIELD_AUTH_TOKEN")}
     try:
         async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, headers=headers) as client:
             resp = await client.post(f"{API_BASE}{path}")

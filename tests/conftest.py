@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 # Dummy credentials so load_credentials() never reads a real .env by accident.
+os.environ["SHIELD_AUTH_TOKEN"] = "test-shield-auth"
 os.environ["ALPACA_API_KEY"] = "test-key"
 os.environ["ALPACA_SECRET_KEY"] = "test-secret"
 os.environ["TELEGRAM_BOT_TOKEN"] = "test-token"

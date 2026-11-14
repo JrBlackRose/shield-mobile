@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import time, uuid, asyncio
+import hmac, os, time, uuid, asyncio
 from typing import Dict, Literal
 from contextlib import asynccontextmanager
 from decimal import Decimal
@@ -16,8 +16,9 @@ import ledger
 PENDING_APPROVALS: Dict[str, dict] = {}
 APPROVAL_TTL_SECONDS = {"INTRADAY": 300, "SWING": 1800}
 
-# HARDCODED TOKEN - Bypassing .env entirely
-AUTH_TOKEN = "secure_shield_key_2026"
+AUTH_TOKEN = os.getenv("SHIELD_AUTH_TOKEN", "").strip()
+if not AUTH_TOKEN:
+    raise RuntimeError("SHIELD_AUTH_TOKEN environment variable is required")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -37,8 +38,9 @@ class WebhookPayload(BaseModel):
     timeframe: Literal["SWING", "INTRADAY"] = "SWING"
 
 def require_auth(x_shield_auth: str = Header(None)):
-    if x_shield_auth != AUTH_TOKEN:
-        print(f"\n[AUTH FAILED] Expected: '{AUTH_TOKEN}', Got: '{x_shield_auth}'")
+    supplied = (x_shield_auth or "").encode("utf-8")
+    if not hmac.compare_digest(supplied, AUTH_TOKEN.encode("utf-8")):
+        print("\n[AUTH FAILED] Unauthorized request.")
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 def check_existing_position(ticker: str) -> bool:
@@ -76,11 +78,14 @@ async def process_trade_job(ticker: str, mode: str, timeframe: str, order_token:
             print(f"[-] Telegram alert failed: {exc}")
     elif result.get("status") == "EXECUTED" and mode == "AUTO":
         tp = result["trade_plan"]
-        ledger.log_execution(
-            order_id=result["order_id"], ticker=ticker, shares=tp["shares"],
-            entry=tp["entry"], stop=tp["stop_loss"], target=tp["take_profit"],
-            risk=tp["max_risk_usd"], timeframe=timeframe,
-        )
+        try:
+            ledger.log_execution(
+                order_id=result["order_id"], ticker=ticker, shares=tp["shares"],
+                entry=tp["entry"], stop=tp["stop_loss"], target=tp["take_profit"],
+                risk=tp["max_risk_usd"], timeframe=timeframe,
+            )
+        except Exception as exc:
+            print(f"[-] AUTO ORDER {result.get('order_id')} PLACED BUT LEDGER WRITE FAILED: {exc}")
         print(f"\n[AUTO-EXECUTED] {ticker} -> {result['order_id']}")
     else:
         print(f"\n[RESULT] {ticker} -> {result.get('status')}: {result.get('reason', 'OK')}")

@@ -5,7 +5,7 @@ dashboard.py -- Project Shield v3.0 Multi-User Standalone Mobile & Smartwatch Ap
 - Smartwatch HUD: Auto/Manual toggle, Instant Execution Feed, 1-Tap Kill Switch.
 - Mobile App: Interactive Manual Approval Cards, On-Demand AI Headline Scanner, Microstructure Audit.
 """
-import json, math, os, uuid
+import hmac, json, math, os, uuid
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from zoneinfo import ZoneInfo
@@ -17,8 +17,8 @@ from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderClass, OrderSide, QueryOrderStatus, TimeInForce
 from alpaca.trading.requests import GetOrdersRequest, LimitOrderRequest, StopLossRequest, TakeProfitRequest
 from dotenv import load_dotenv
-from fastapi import FastAPI, Header, HTTPException
-from fastapi.responses import HTMLResponse, Response
+from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from google import genai
 from google.genai import types
 from pydantic import BaseModel
@@ -26,8 +26,22 @@ from microstructure import calc_imbalance_and_micro, check_us_session, evaluate_
 from paper_engine import MAX_SLIPPAGE_COLLAR_PCT, round_to_tick, step4_risk_math
 
 load_dotenv()
+SHIELD_AUTH_TOKEN = os.getenv("SHIELD_AUTH_TOKEN", "").strip()
+if not SHIELD_AUTH_TOKEN:
+    raise RuntimeError("SHIELD_AUTH_TOKEN environment variable is required")
 NY_TZ, MY_TZ = ZoneInfo("America/New_York"), ZoneInfo("Asia/Kuala_Lumpur")
 app = FastAPI(title="Project Shield v3.0 Multi-User App")
+
+
+@app.middleware("http")
+async def require_shield_auth(request: Request, call_next):
+    if request.url.path == "/api" or request.url.path.startswith("/api/"):
+        supplied = request.headers.get("x-shield-auth", "")
+        if not hmac.compare_digest(
+            supplied.encode("utf-8"), SHIELD_AUTH_TOKEN.encode("utf-8")
+        ):
+            return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+    return await call_next(request)
 
 # Per-user in-memory session state (isolated by each user's API key hash)
 USER_SESSIONS = {}
@@ -57,11 +71,11 @@ def record_event(sess: dict, msg: str, tg_token: str = "", tg_chat: str = ""):
             pass
 
 def resolve_keys(k: str, s: str, g: str, t_tok: str, t_chat: str):
-    ak = k.strip() or os.getenv("ALPACA_API_KEY") or os.getenv("APCA_API_KEY_ID") or ""
-    as_ = s.strip() or os.getenv("ALPACA_SECRET_KEY") or os.getenv("APCA_API_SECRET_KEY") or ""
-    gk = g.strip() or os.getenv("GEMINI_API_KEY") or ""
-    tt = t_tok.strip() or os.getenv("TELEGRAM_BOT_TOKEN") or ""
-    tc = t_chat.strip() or os.getenv("TELEGRAM_CHAT_ID") or ""
+    ak = (k or "").strip()
+    as_ = (s or "").strip()
+    gk = (g or "").strip()
+    tt = (t_tok or "").strip()
+    tc = (t_chat or "").strip()
     if not ak or not as_:
         raise HTTPException(status_code=401, detail="Please tap [🔐 Connect API] to enter your Alpaca API Key & Secret.")
     return ak, as_, gk, tt, tc
@@ -327,6 +341,7 @@ def ui():
       <button onclick="toggleKeys()" class="text-slate-400 text-sm">✕</button>
     </div>
     <p class="text-[11px] text-slate-400">Keys are stored <b>only on your own device</b>. Every user trades their own Alpaca Paper account independently.</p>
+    <div><label class="text-xs text-slate-300">Dashboard Auth Token *</label><input id="k-auth" type="password" class="w-full mt-1 bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs font-mono" placeholder="X-Shield-Auth token"></div>
     <div><label class="text-xs text-slate-300">Alpaca API Key ID *</label><input id="k-ak" class="w-full mt-1 bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs font-mono" placeholder="PK..."></div>
     <div><label class="text-xs text-slate-300">Alpaca Secret Key *</label><input id="k-as" type="password" class="w-full mt-1 bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs font-mono" placeholder="Your Alpaca Secret"></div>
     <div><label class="text-xs text-slate-300">Gemini API Key (For AI News Scanner)</label><input id="k-gk" type="password" class="w-full mt-1 bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs font-mono" placeholder="AIza..."></div>
@@ -427,6 +442,7 @@ let mode='AUTO', watch=false;
 function hdrs(){
   return {
     'Content-Type':'application/json',
+    'X-Shield-Auth':localStorage.getItem('sh_auth')||'',
     'x-alpaca-key':localStorage.getItem('sh_ak')||'',
     'x-alpaca-secret':localStorage.getItem('sh_as')||'',
     'x-gemini-key':localStorage.getItem('sh_gk')||'',
@@ -436,6 +452,7 @@ function hdrs(){
 }
 function toggleKeys(){
   const m=document.getElementById('key-modal');
+  document.getElementById('k-auth').value=localStorage.getItem('sh_auth')||'';
   document.getElementById('k-ak').value=localStorage.getItem('sh_ak')||'';
   document.getElementById('k-as').value=localStorage.getItem('sh_as')||'';
   document.getElementById('k-gk').value=localStorage.getItem('sh_gk')||'';
@@ -444,6 +461,7 @@ function toggleKeys(){
   m.classList.toggle('hidden');
 }
 function saveKeys(){
+  localStorage.setItem('sh_auth',document.getElementById('k-auth').value.trim());
   localStorage.setItem('sh_ak',document.getElementById('k-ak').value.trim());
   localStorage.setItem('sh_as',document.getElementById('k-as').value.trim());
   localStorage.setItem('sh_gk',document.getElementById('k-gk').value.trim());

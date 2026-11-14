@@ -351,15 +351,13 @@ def test_auto_mode_never_stages_a_manual_approval(env):
     assert server.PENDING_APPROVALS == {} and env.telegram == []
 
 
-# ----------------------------- known gaps (documented; strict xfail flips to a failure when fixed) ----------------------------- #
-@pytest.mark.xfail(strict=True, reason="AUTO path: ledger write is not guarded, so a DB error crashes the job after the order was already placed")
+# ----------------------------- regression guards ----------------------------- #
 def test_auto_mode_ledger_failure_is_contained(env, monkeypatch):
     env.pipeline_result = dict(AUTO_RESULT)
     monkeypatch.setattr(server.ledger, "log_execution", lambda **k: (_ for _ in ()).throw(OSError("disk full")))
     asyncio.run(server.process_trade_job("AAA", "AUTO", "SWING", "t"))     # must not raise
 
 
-@pytest.mark.xfail(strict=True, reason="require_auth prints the EXPECTED secret to the console/logs on every failed attempt")
 def test_failed_auth_does_not_leak_the_secret(anon, capsys):
     anon.post("/kill-switch", headers={"x-shield-auth": "guess"})
     assert server.AUTH_TOKEN not in capsys.readouterr().out
