@@ -1,0 +1,37 @@
+{
+  "app_name": "Project Shield",
+  "package_id": "com.projectshield.trader",
+  "version": "3.0.0",
+  "architecture": {
+    "engine_type": "Standalone_BYOK",
+    "supported_platforms": ["Android Phone", "Android Tablet", "WearOS Companion"],
+    "required_user_keys": ["alpaca_api_key", "alpaca_secret_key", "gemini_api_key"]
+  },
+  "endpoints": {
+    "alpaca_trading_rest": "https://paper-api.alpaca.markets/v2",
+    "alpaca_data_rest": "https://data.alpaca.markets/v2",
+    "alpaca_news_ws": "wss://stream.data.alpaca.markets/v2/iex",
+    "gemini_rest": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+  },
+  "risk_rules": {
+    "account_risk_budget_pct": 0.01,
+    "portfolio_notional_cap_pct": 0.15,
+    "limit_collar_bps": 15,
+    "formula_shares": "min(floor((equity * 0.01) / (entry - stop_loss)), floor((equity * 0.15) / entry))",
+    "formula_limit_collar": "round_to_cent(entry * (1 + 0.0015))"
+  },
+  "market_microstructure": {
+    "imbalance_formula": "(bid_size - ask_size) / (bid_size + ask_size)",
+    "micro_price_formula": "mid_price + 0.5 * imbalance * spread",
+    "max_intraday_spread_bps": 45.0,
+    "claim_to_tape_divergence": "s_nlp - tanh(z_ofi / 2.0)",
+    "trap_veto_condition": "divergence >= 1.10"
+  },
+  "ui_screens": [
+    "KeyVaultScreen (Enter Alpaca & Gemini Keys)",
+    "DashboardScreen (Equity, P&L, Active Positions, Open Orders)",
+    "ModeToggle (AUTO Execution vs MANUAL Card Approval)",
+    "WatchHUD (Ultra-compact 300x300 WearOS wrist layout)",
+    "EmergencyKillSwitch (One-tap order cancellation & position flatten)"
+  ]
+}
