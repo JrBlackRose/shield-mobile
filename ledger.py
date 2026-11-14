@@ -34,9 +34,15 @@ def init_db():
                 take_profit REAL NOT NULL,
                 max_risk_usd REAL NOT NULL,
                 timeframe TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'OPEN'
+                status TEXT NOT NULL DEFAULT 'OPEN',
+                client_order_id TEXT
             )
         """)
+        columns = {
+            row[1] for row in cursor.execute("PRAGMA table_info(trade_executions)").fetchall()
+        }
+        if "client_order_id" not in columns:
+            cursor.execute("ALTER TABLE trade_executions ADD COLUMN client_order_id TEXT")
         conn.commit()
 
 def log_audit(ticker: str, status: str, reason: str, timeframe: str):
@@ -49,15 +55,15 @@ def log_audit(ticker: str, status: str, reason: str, timeframe: str):
         """, (datetime.now(timezone.utc).isoformat(), ticker, status, reason, timeframe))
         conn.commit()
 
-def log_execution(order_id: str, ticker: str, shares: int, entry: Decimal, stop: Decimal, target: Decimal, risk: Decimal, timeframe: str):
+def log_execution(order_id: str, ticker: str, shares: int, entry: Decimal, stop: Decimal, target: Decimal, risk: Decimal, timeframe: str, client_order_id: str | None = None):
     """Records an executed parent bracket trade."""
     with sqlite3.connect(DB_PATH) as conn:
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO trade_executions (
-                timestamp, order_id, ticker, shares, entry_price, stop_loss, take_profit, max_risk_usd, timeframe
+                timestamp, order_id, ticker, shares, entry_price, stop_loss, take_profit, max_risk_usd, timeframe, client_order_id
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             datetime.now(timezone.utc).isoformat(),
             str(order_id),
@@ -67,7 +73,8 @@ def log_execution(order_id: str, ticker: str, shares: int, entry: Decimal, stop:
             float(stop),
             float(target),
             float(risk),
-            timeframe
+            timeframe,
+            client_order_id
         ))
         conn.commit()
 

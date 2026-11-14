@@ -9,7 +9,7 @@ import math
 import os
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
@@ -29,6 +29,8 @@ from alpaca.trading.requests import (
     StopLossRequest,
     TakeProfitRequest,
 )
+
+from risk_gates import check_order_allowed, new_client_order_id
 
 EDGAR_IDENTITY = "ProjectShield allendraa.anbalagan@gmail.com"
 CORPORATE_ACTIONS_URL = "https://data.alpaca.markets/v1/corporate-actions"
@@ -89,6 +91,7 @@ class BracketPlan:
     take_profit: Decimal
     risk_per_share: Decimal
     shares: int
+    client_order_id: str | None = None
 
     @property
     def position_cost(self) -> Decimal:
@@ -428,9 +431,15 @@ def step5_execute(trading_client: TradingClient, ticker: str, plan: BracketPlan,
     Guarantees the fill price cannot exceed (Entry + 15 bps).
     If the market gaps past the collar, the order rests or cancels rather than slipping.
     """
+    allowed, reason = check_order_allowed(trading_client, ticker, plan, timeframe)
+    if not allowed:
+        raise RuleReject("GATE:" + (reason or "GATE_ERROR: unknown"))
+
+    client_order_id = getattr(plan, "client_order_id", None) or new_client_order_id()
+
     # Calculate the maximum allowable price we are willing to pay
     limit_buy_price = round_to_tick(plan.entry * (Decimal("1") + MAX_SLIPPAGE_COLLAR_PCT))
-    
+
     order_request = LimitOrderRequest(
         symbol=ticker,
         qty=plan.shares,
@@ -440,11 +449,21 @@ def step5_execute(trading_client: TradingClient, ticker: str, plan: BracketPlan,
         order_class=OrderClass.BRACKET,
         take_profit=TakeProfitRequest(limit_price=float(plan.take_profit)),
         stop_loss=StopLossRequest(stop_price=float(plan.stop_loss)),
+        client_order_id=client_order_id,
     )
     try:
         order = trading_client.submit_order(order_data=order_request)
         return str(order.id)
     except Exception as exc:
+        # A timeout/connection drop can happen after Alpaca accepted the order.
+        # Recover by client order id before reporting a failure.
+        try:
+            existing = trading_client.get_order_by_client_id(client_order_id)
+            existing_id = getattr(existing, "id", None)
+            if existing_id:
+                return str(existing_id)
+        except Exception:
+            pass
         raise PipelineAbort(f"Collared Order submission failed: {exc}") from exc
 
 def run_pipeline(ticker: str, execution_mode: str = "MANUAL", timeframe: str = "SWING") -> dict:
@@ -465,6 +484,7 @@ def run_pipeline(ticker: str, execution_mode: str = "MANUAL", timeframe: str = "
         market_cap = estimate_market_cap(Decimal(str(audit_res["latest_weighted_shares"])), Decimal(str(ask)))
         news_res = step2_truth_cross_examiner(company, ticker, key, secret, market_cap=market_cap)
         plan = step4_risk_math(equity, ask, timeframe)
+        plan = replace(plan, client_order_id=new_client_order_id())
     except RuleReject as reject_err:
         return {"status": "REJECTED", "ticker": ticker, "reason": str(reject_err)}
     except PipelineAbort as abort_err:
@@ -490,6 +510,7 @@ def run_pipeline(ticker: str, execution_mode: str = "MANUAL", timeframe: str = "
             "max_risk_usd": float(plan.shares * plan.risk_per_share),
             "reward_risk_ratio": "3.00:1",
             "timeframe": timeframe,
+            "client_order_id": plan.client_order_id,
         },
     }
 
@@ -498,6 +519,9 @@ def run_pipeline(ticker: str, execution_mode: str = "MANUAL", timeframe: str = "
             order_id = step5_execute(trading_client, ticker, plan, timeframe)
             signal_event["status"] = "EXECUTED"
             signal_event["order_id"] = order_id
+        except RuleReject as exc:
+            signal_event["status"] = "REJECTED"
+            signal_event["reason"] = str(exc)
         except PipelineAbort as exc:
             signal_event["status"] = "EXECUTION_FAILED"
             signal_event["reason"] = str(exc)
@@ -538,6 +562,7 @@ if __name__ == "__main__":
                     Decimal(str(tp["take_profit"])),
                     Decimal(str(tp["entry"] - tp["stop_loss"])),
                     tp["shares"],
+                    client_order_id=tp.get("client_order_id"),
                 )
                 oid = step5_execute(tc, res["ticker"], plan)
                 print(f"[+] SUCCESS: Order Submitted -> {oid}")

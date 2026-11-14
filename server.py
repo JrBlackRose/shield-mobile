@@ -11,6 +11,7 @@ from alpaca.trading.enums import QueryOrderStatus
 from alpaca.trading.requests import GetOrdersRequest
 from paper_engine import (run_pipeline, load_credentials, step5_execute, BracketPlan, fetch_latest_ask, check_price_drift, PipelineAbort, RuleReject)
 from telegram_notifier import send_approval_request, start_telegram_listener
+from risk_gates import new_client_order_id
 import ledger
 
 PENDING_APPROVALS: Dict[str, dict] = {}
@@ -69,6 +70,8 @@ async def process_trade_job(ticker: str, mode: str, timeframe: str, order_token:
     result = await asyncio.to_thread(run_pipeline, ticker, mode, timeframe)
     ledger.log_audit(ticker, result.get("status", "UNKNOWN"), result.get("reason", "OK"), timeframe)
     if result.get("status") == "APPROVED" and mode == "MANUAL":
+        tp = result.setdefault("trade_plan", {})
+        tp["client_order_id"] = tp.get("client_order_id") or new_client_order_id()
         result["staged_at"] = time.time()
         PENDING_APPROVALS[order_token] = result
         print(f"\n[STAGED] {ticker} passed audit. Awaiting approval: {order_token}")
@@ -83,6 +86,7 @@ async def process_trade_job(ticker: str, mode: str, timeframe: str, order_token:
                 order_id=result["order_id"], ticker=ticker, shares=tp["shares"],
                 entry=tp["entry"], stop=tp["stop_loss"], target=tp["take_profit"],
                 risk=tp["max_risk_usd"], timeframe=timeframe,
+                client_order_id=tp.get("client_order_id"),
             )
         except Exception as exc:
             print(f"[-] AUTO ORDER {result.get('order_id')} PLACED BUT LEDGER WRITE FAILED: {exc}")
@@ -130,12 +134,22 @@ def confirm_order(token: str, x_shield_auth: str = Header(None)):
         raise HTTPException(status_code=503, detail=f"Price re-check unavailable: {exc}")
     trading_client = TradingClient(key, secret, paper=True)
     entry, stop = Decimal(str(tp["entry"])), Decimal(str(tp["stop_loss"]))
+    client_order_id = tp.get("client_order_id") or new_client_order_id()
+    tp["client_order_id"] = client_order_id
     plan = BracketPlan(
         Decimal(str(tp["capital_required"])), Decimal(str(tp["max_risk_usd"])),
         entry, stop, Decimal(str(tp["take_profit"])), entry - stop, tp["shares"],
+        client_order_id=client_order_id,
     )
     try:
         order_id = step5_execute(trading_client, ticker, plan, timeframe)
+    except RuleReject as exc:
+        reason = str(exc)
+        if reason.startswith("GATE:"):
+            ledger.log_audit(ticker, "GATE_REJECTED", reason, timeframe)
+            PENDING_APPROVALS[token] = staged
+            raise HTTPException(status_code=409, detail=reason)
+        raise HTTPException(status_code=500, detail=f"Broker execution failed: {exc}")
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Broker execution failed: {exc}")
     try:
@@ -143,6 +157,7 @@ def confirm_order(token: str, x_shield_auth: str = Header(None)):
             order_id=str(order_id), ticker=ticker, shares=tp["shares"],
             entry=tp["entry"], stop=tp["stop_loss"], target=tp["take_profit"],
             risk=tp["max_risk_usd"], timeframe=timeframe,
+            client_order_id=client_order_id,
         )
     except Exception as exc:
         print(f"[-] ORDER {order_id} PLACED BUT LEDGER WRITE FAILED: {exc}")

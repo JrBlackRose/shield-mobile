@@ -81,8 +81,9 @@ def test_invariants_hold_across_grid(equity, ask, timeframe):
 
 # --------------------------- step 5: order construction --------------------------- #
 class FakeBroker:
-    def __init__(self, fail=False):
-        self.requests, self.fail = [], fail
+    def __init__(self, fail=False, recovered=None):
+        self.requests, self.fail, self.recovered = [], fail, recovered
+        self.lookups = []
 
     def submit_order(self, order_data):
         if self.fail:
@@ -90,9 +91,18 @@ class FakeBroker:
         self.requests.append(order_data)
         return type("O", (), {"id": "order-123"})()
 
+    def get_order_by_client_id(self, client_id):
+        self.lookups.append(client_id)
+        return self.recovered
+
+
+@pytest.fixture
+def passing_gate(monkeypatch):
+    monkeypatch.setattr(pe, "check_order_allowed", lambda *a, **k: (True, None))
+
 
 @pytest.mark.parametrize("timeframe,tif", [("SWING", "gtc"), ("INTRADAY", "day")])
-def test_step5_bracket_and_time_in_force(timeframe, tif):
+def test_step5_bracket_and_time_in_force(timeframe, tif, passing_gate):
     plan = step4_risk_math(100_000, 100.0, timeframe)
     broker = FakeBroker()
     assert pe.step5_execute(broker, "AAPL", plan, timeframe) == "order-123"
@@ -102,9 +112,27 @@ def test_step5_bracket_and_time_in_force(timeframe, tif):
     assert req.time_in_force.value == tif
     assert req.stop_loss.stop_price == float(plan.stop_loss)
     assert req.take_profit.limit_price == float(plan.take_profit)
+    assert req.client_order_id.startswith("shield-")
 
 
-def test_step5_broker_failure_becomes_pipeline_abort():
+def test_step5_uses_plan_client_order_id(passing_gate):
+    from dataclasses import replace
+    plan = replace(step4_risk_math(100_000, 100.0, "SWING"), client_order_id="shield-fixed")
+    broker = FakeBroker()
+    pe.step5_execute(broker, "AAPL", plan)
+    assert broker.requests[0].client_order_id == "shield-fixed"
+
+
+def test_step5_broker_failure_becomes_pipeline_abort(passing_gate):
     plan = step4_risk_math(100_000, 100.0, "SWING")
+    broker = FakeBroker(fail=True)
     with pytest.raises(PipelineAbort, match="Order submission failed"):
-        pe.step5_execute(FakeBroker(fail=True), "AAPL", plan)
+        pe.step5_execute(broker, "AAPL", plan)
+    assert broker.lookups and broker.lookups[0].startswith("shield-")
+
+
+def test_step5_ambiguous_failure_recovers_order_by_client_id(passing_gate):
+    plan = step4_risk_math(100_000, 100.0, "SWING")
+    broker = FakeBroker(fail=True, recovered=type("O", (), {"id": "recovered-1"})())
+    assert pe.step5_execute(broker, "AAPL", plan) == "recovered-1"
+    assert broker.lookups[0].startswith("shield-")

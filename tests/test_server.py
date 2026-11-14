@@ -107,6 +107,7 @@ def test_approved_manual_trade_is_staged_with_timestamp_and_telegram_card(client
     env.pipeline_result = {"status": "APPROVED", "ticker": "AAPL", "trade_plan": {"entry": 100.0}}
     token = client.post("/webhook", json={"ticker": "AAPL"}, headers=AUTH).json()["approval_token"]
     assert time.time() - server.PENDING_APPROVALS[token]["staged_at"] < 5
+    assert server.PENDING_APPROVALS[token]["trade_plan"]["client_order_id"].startswith("shield-")
     assert env.telegram[0][0] == token
 
 
@@ -185,6 +186,7 @@ def test_confirm_swing_success_places_order_and_ledgers_it(client, env, db_rows)
     assert (ticker, plan.shares, tf) == ("AAA", 10, "SWING")
     (row,) = db_rows("trade_executions")
     assert row["order_id"] == "oid-1" and row["timeframe"] == "SWING"
+    assert row["client_order_id"].startswith("shield-")
 
 
 def test_confirm_intraday_uses_intraday_everywhere(client, env, db_rows):

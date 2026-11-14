@@ -24,6 +24,7 @@ from google.genai import types
 from pydantic import BaseModel
 from microstructure import calc_imbalance_and_micro, check_us_session, evaluate_catalyst_vs_tape, fetch_free_iex_snapshot, USMarketRegime
 from paper_engine import MAX_SLIPPAGE_COLLAR_PCT, round_to_tick, step4_risk_math
+from risk_gates import check_order_allowed, new_client_order_id
 
 load_dotenv()
 SHIELD_AUTH_TOKEN = os.getenv("SHIELD_AUTH_TOKEN", "").strip()
@@ -119,6 +120,11 @@ def execute_collared_bracket(ak: str, as_: str, ticker: str, timeframe: str, for
 
 def submit_alpaca_bracket(ak: str, as_: str, plan_dict: dict) -> str:
     tc = TradingClient(api_key=ak, secret_key=as_, paper=True)
+    client_order_id = plan_dict.get("client_order_id") or new_client_order_id()
+    plan_dict["client_order_id"] = client_order_id
+    allowed, reason = check_order_allowed(tc, plan_dict["ticker"], plan_dict, plan_dict.get("timeframe"))
+    if not allowed:
+        raise HTTPException(status_code=409, detail=reason or "GATE_ERROR: unknown")
     req = LimitOrderRequest(
         symbol=plan_dict["ticker"],
         qty=plan_dict["shares"],
@@ -128,6 +134,7 @@ def submit_alpaca_bracket(ak: str, as_: str, plan_dict: dict) -> str:
         order_class=OrderClass.BRACKET,
         take_profit=TakeProfitRequest(limit_price=plan_dict["take_profit"]),
         stop_loss=StopLossRequest(stop_price=plan_dict["stop_loss"]),
+        client_order_id=client_order_id,
     )
     order = tc.submit_order(order_data=req)
     return str(order.id)
@@ -226,8 +233,13 @@ def trigger_trade(
     plan = execute_collared_bracket(ak, as_, sym, p.timeframe, p.force_offhours)
 
     if sess["mode"] == "AUTO":
-        oid = submit_alpaca_bracket(ak, as_, plan)
-        record_event(sess, f"⚡ AUTO EXECUTED {sym}: {plan['shares']} sh @ Collar <= ${plan['limit_collar']} (Stop ${plan['stop_loss']})", tt, tc)
+        try:
+            oid = submit_alpaca_bracket(ak, as_, plan)
+        except HTTPException as exc:
+            if exc.status_code == 409:
+                record_event(sess, f"⛔ GATE BLOCKED AUTO {sym}: {exc.detail} (coid={plan.get('client_order_id')})", tt, tc)
+            raise
+        record_event(sess, f"⚡ AUTO EXECUTED {sym}: {plan['shares']} sh @ Collar <= ${plan['limit_collar']} (Stop ${plan['stop_loss']}) (coid={plan.get('client_order_id')})", tt, tc)
         return {"status": "AUTO_EXECUTED", "order_id": oid, "plan": plan}
     else:
         token = str(uuid.uuid4())[:8]
@@ -263,8 +275,13 @@ Headline: {p.headline}"""
     sym = dec["ticker"].strip().upper()
     plan = execute_collared_bracket(ak, as_, sym, "SWING", p.force_offhours)
     if sess["mode"] == "AUTO":
-        oid = submit_alpaca_bracket(ak, as_, plan)
-        record_event(sess, f"🤖 AI AUTO-EXECUTED {sym} (Sent={dec.get('sentiment')}): {plan['shares']} sh @ <=${plan['limit_collar']}", tt, tc)
+        try:
+            oid = submit_alpaca_bracket(ak, as_, plan)
+        except HTTPException as exc:
+            if exc.status_code == 409:
+                record_event(sess, f"⛔ GATE BLOCKED AI AUTO {sym}: {exc.detail} (coid={plan.get('client_order_id')})", tt, tc)
+            raise
+        record_event(sess, f"🤖 AI AUTO-EXECUTED {sym} (Sent={dec.get('sentiment')}): {plan['shares']} sh @ <=${plan['limit_collar']} (coid={plan.get('client_order_id')})", tt, tc)
         return {"ai_decision": dec, "action": "AUTO_EXECUTED", "order_id": oid, "plan": plan}
     else:
         token = str(uuid.uuid4())[:8]
@@ -286,13 +303,19 @@ def handle_card(
 ):
     ak, as_, _, tt, tc = resolve_keys(x_alpaca_key, x_alpaca_secret, x_gemini_key, x_tg_token, x_tg_chat)
     sess = get_user_session(ak)
-    card = next((c for c in sess["pending_cards"] if c["token"] == token), None)
-    if not card:
+    card_index = next((i for i, c in enumerate(sess["pending_cards"]) if c["token"] == token), None)
+    if card_index is None:
         raise HTTPException(status_code=404, detail="Card already processed or expired.")
-    sess["pending_cards"] = [c for c in sess["pending_cards"] if c["token"] != token]
+    card = sess["pending_cards"].pop(card_index)
     if action == "approve":
-        oid = submit_alpaca_bracket(ak, as_, card)
-        record_event(sess, f"✅ APPROVED & EXECUTED {card['ticker']}: {card['shares']} sh @ <=${card['limit_collar']}", tt, tc)
+        try:
+            oid = submit_alpaca_bracket(ak, as_, card)
+        except HTTPException as exc:
+            if exc.status_code == 409:
+                sess["pending_cards"].insert(card_index, card)
+                record_event(sess, f"⛔ GATE BLOCKED manual card {card['ticker']}: {exc.detail} (coid={card.get('client_order_id')})", tt, tc)
+            raise
+        record_event(sess, f"✅ APPROVED & EXECUTED {card['ticker']}: {card['shares']} sh @ <=${card['limit_collar']} (coid={card.get('client_order_id')})", tt, tc)
         return {"status": "EXECUTED", "order_id": oid}
     else:
         record_event(sess, f"❌ REJECTED {card['ticker']} manual card.", tt, tc)
