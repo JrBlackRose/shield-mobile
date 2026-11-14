@@ -31,7 +31,9 @@ load_dotenv()
 ALPACA_KEY = os.getenv("ALPACA_API_KEY") or os.getenv("APCA_API_KEY_ID")
 ALPACA_SECRET = os.getenv("ALPACA_SECRET_KEY") or os.getenv("APCA_API_SECRET_KEY")
 GEMINI_KEY = os.getenv("GEMINI_API_KEY")
-SHIELD_TOKEN = "secure_shield_key_2026"
+SHIELD_TOKEN = os.getenv("SHIELD_AUTH_TOKEN", "").strip()
+if not SHIELD_TOKEN:
+    raise RuntimeError("SHIELD_AUTH_TOKEN environment variable is required")
 
 def get_live_execution_mode() -> str:
     try:
